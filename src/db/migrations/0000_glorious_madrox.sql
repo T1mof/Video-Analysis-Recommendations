@@ -13,7 +13,7 @@ CREATE TABLE "events" (
 CREATE TABLE "user_profiles" (
 	"user_id" uuid PRIMARY KEY NOT NULL,
 	"taxonomy_version" integer NOT NULL,
-	"embedding" vector(85) NOT NULL,
+	"embedding" vector(83) NOT NULL,
 	"tag_affinity" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"interaction_count" integer DEFAULT 0 NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL
@@ -36,7 +36,7 @@ CREATE TABLE "users" (
 CREATE TABLE "video_embeddings" (
 	"video_id" uuid PRIMARY KEY NOT NULL,
 	"taxonomy_version" integer NOT NULL,
-	"embedding" vector(85) NOT NULL
+	"embedding" vector(83) NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "video_features" (

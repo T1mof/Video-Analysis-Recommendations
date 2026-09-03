@@ -1,5 +1,4 @@
 import {
-  CATEGORICAL_DIM,
   TAXONOMY,
   TAXONOMY_DIM,
   TAXONOMY_KEYS,
@@ -9,23 +8,28 @@ import {
 import { confidenceFor, type VideoFeatures } from './schema.ts';
 
 /**
- * Deterministic taxonomy embedding.
+ * Deterministic taxonomy embedding - CATEGORICAL DIMENSIONS ONLY.
  *
- * A confidence-weighted multi-hot encoding of the closed taxonomy - no second
- * model, no GPU, no drift between runs. The payoff is that user profiles are
- * built in the *same* space (a profile is just a weighted sum of video vectors),
- * so cosine similarity decomposes back into named tag contributions and the demo
- * can answer "why was this recommended?" with real dimension names.
+ * A confidence-weighted multi-hot encoding of the closed taxonomy: no second
+ * model, no GPU, no drift between runs. Because a user profile is built in the
+ * same space (a weighted sum of video vectors), cosine similarity decomposes back
+ * into named tag contributions, so the demo can answer "why was this
+ * recommended?" with real dimension names.
  *
- * The cost is that anything outside the taxonomy is invisible. The upgrade path
- * (concatenate a text embedding of the caption, or move to a learned two-tower
- * encoder) is discussed in ARCHITECTURE.md.
+ * What is NOT in here, on purpose: aestheticScore, duration, popularity,
+ * freshness. Those are continuous quality/context signals, not content identity.
+ * Folding them into the vector would corrupt the meaning of cosine similarity -
+ * two unrelated videos would look "similar" merely for being equally popular or
+ * equally long. They are applied as separate weighted terms at the ranking stage
+ * (../recommend/rank.ts), where they can be tuned independently and where their
+ * effect stays auditable.
+ *
+ * The cost of a categorical-only vector is that anything outside the taxonomy is
+ * invisible. The upgrade path (concatenate a text embedding of the caption, or
+ * move to a learned two-tower encoder) is discussed in ARCHITECTURE.md.
  */
 
-/** Duration at which the normalised-duration dimension saturates. */
-const DURATION_SATURATION_S = 180;
-
-export function encodeFeatures(features: VideoFeatures, durationSeconds: number): number[] {
+export function encodeFeatures(features: VideoFeatures): number[] {
   const vec = new Array<number>(TAXONOMY_DIM).fill(0);
 
   for (const key of TAXONOMY_KEYS) {
@@ -45,9 +49,6 @@ export function encodeFeatures(features: VideoFeatures, durationSeconds: number)
       vec[idx] = share * confidence;
     }
   }
-
-  vec[CATEGORICAL_DIM] = features.aestheticScore;
-  vec[CATEGORICAL_DIM + 1] = Math.min(durationSeconds / DURATION_SATURATION_S, 1);
 
   return normalize(vec);
 }
@@ -114,10 +115,24 @@ export function explainSimilarity(
 /** Top tag names in a profile vector - shown as "your taste" in the demo. */
 export function topDimensions(vec: readonly number[], topN = 8): Contribution[] {
   const terms: Contribution[] = [];
-  for (let i = 0; i < CATEGORICAL_DIM; i++) {
+  for (let i = 0; i < TAXONOMY_DIM; i++) {
     const value = vec[i] ?? 0;
     if (value > 0) terms.push({ dimension: describeSlot(i), contribution: value });
   }
   terms.sort((a, b) => b.contribution - a.contribution);
   return terms.slice(0, topN);
+}
+
+/**
+ * Tag affinity map mirrored from a profile vector, for tag-based candidate
+ * generation (a SQL query over the jsonb features) and for display. Keys are
+ * "field:value" strings matching TAXONOMY_LAYOUT.
+ */
+export function toTagAffinity(vec: readonly number[], minWeight = 0.01): Record<string, number> {
+  const affinity: Record<string, number> = {};
+  for (let i = 0; i < TAXONOMY_DIM; i++) {
+    const value = vec[i] ?? 0;
+    if (value > minWeight) affinity[describeSlot(i)] = value;
+  }
+  return affinity;
 }

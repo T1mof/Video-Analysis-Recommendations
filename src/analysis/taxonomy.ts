@@ -1,5 +1,5 @@
 /**
- * Closed content taxonomy.
+ * Closed content taxonomy and the frozen tag -> dimension mapping.
  *
  * The VLM is never allowed to invent tags: it must answer with values drawn from
  * these lists (enforced by Zod in ./schema.ts). Three reasons this matters:
@@ -7,19 +7,27 @@
  *  1. A fixed vocabulary is a fixed vector layout, so video and user-profile
  *     embeddings live in the same interpretable space (see ./embedding.ts).
  *  2. Free-text tags drift between model versions and make features from two
- *     models incomparable - which would break the benchmark in scripts/bench-vlm.ts.
+ *     models incomparable - which would break scripts/bench-vlm.ts.
  *  3. Recommendations become explainable: every dimension has a name.
+ *
+ * The embedding is CATEGORICAL ONLY. Continuous signals - aesthetic score,
+ * duration, popularity, freshness - are deliberately kept out of the vector and
+ * applied at the ranking stage instead (see ../recommend/rank.ts). Mixing them in
+ * would make cosine similarity mean "similar content AND similar popularity",
+ * which is not a meaningful notion of content similarity and would let a popular
+ * video look topically close to an unrelated popular one.
  *
  * Deliberately NOT included: ethnicity/race inference. It is unreliable from a
  * handful of frames, and building a recommender that optimises on inferred race is
  * a liability with no upside here - other axes carry the personalisation signal.
  * See ARCHITECTURE.md "Tradeoffs".
- *
- * Changing any list changes TAXONOMY_DIM and invalidates stored embeddings; bump
- * TAXONOMY_VERSION and re-encode. Analysis rows record the version they were
- * written with.
  */
 
+/**
+ * Bump whenever TAXONOMY_LAYOUT changes in any way (added value, removed value,
+ * reordered). Stored on every embedding row so stale vectors are detectable
+ * rather than silently mismatched.
+ */
 export const TAXONOMY_VERSION = 1;
 
 export type FieldKind = 'single' | 'multi';
@@ -27,7 +35,7 @@ export type FieldKind = 'single' | 'multi';
 export interface TaxonomyField {
   readonly kind: FieldKind;
   readonly values: readonly string[];
-  /** Relative pull this field has on similarity. Applied when encoding vectors. */
+  /** Relative pull this field has on content similarity. Applied when encoding. */
   readonly weight: number;
   readonly description: string;
 }
@@ -78,15 +86,7 @@ export const TAXONOMY = {
   clothing: {
     kind: 'multi',
     weight: 0.9,
-    values: [
-      'lingerie',
-      'swimwear',
-      'casual',
-      'costume',
-      'uniform',
-      'partially_nude',
-      'nude',
-    ],
+    values: ['lingerie', 'swimwear', 'casual', 'costume', 'uniform', 'partially_nude', 'nude'],
     description: 'What the performer(s) are wearing',
   },
   actType: {
@@ -162,60 +162,159 @@ export type TaxonomyKey = keyof Taxonomy;
 
 export const TAXONOMY_KEYS = Object.keys(TAXONOMY) as TaxonomyKey[];
 
-/** Values a single field may take. */
 export type ValueOf<K extends TaxonomyKey> = Taxonomy[K]['values'][number];
 
 /**
- * Fixed vector slot layout: one dimension per (field, value) pair, in a stable
- * order derived from the declaration order above. Two extra tail slots carry
- * continuous signals that are not categorical.
+ * FROZEN tag -> dimension mapping for TAXONOMY_VERSION 1.
+ *
+ * Written out explicitly rather than derived from object key order, because
+ * object order is an accident of declaration: reordering a field above would
+ * silently shift every dimension after it and quietly invalidate every stored
+ * embedding. Index in this array IS the vector dimension, permanently.
+ *
+ * To change the taxonomy: append new entries at the END, bump TAXONOMY_VERSION,
+ * and re-encode. Never insert or reorder.
  */
-export interface SlotRef {
-  readonly key: TaxonomyKey;
-  readonly value: string;
-  readonly index: number;
-  readonly weight: number;
-}
+export const TAXONOMY_LAYOUT = [
+  'performerCount:none',
+  'performerCount:solo',
+  'performerCount:duo',
+  'performerCount:group',
 
-function buildLayout(): { slots: SlotRef[]; index: Map<string, number> } {
-  const slots: SlotRef[] = [];
-  const index = new Map<string, number>();
-  for (const key of TAXONOMY_KEYS) {
-    const field = TAXONOMY[key];
-    for (const value of field.values) {
-      const slot: SlotRef = { key, value, index: slots.length, weight: field.weight };
-      index.set(`${key}:${value}`, slot.index);
-      slots.push(slot);
-    }
-  }
-  return { slots, index };
-}
+  'performerGenders:female',
+  'performerGenders:male',
+  'performerGenders:trans',
+  'performerGenders:unknown',
 
-const layout = buildLayout();
+  'hairColor:blonde',
+  'hairColor:brunette',
+  'hairColor:black',
+  'hairColor:red',
+  'hairColor:colored',
+  'hairColor:other',
 
-export const TAXONOMY_SLOTS: readonly SlotRef[] = layout.slots;
+  'bodyType:slim',
+  'bodyType:athletic',
+  'bodyType:curvy',
+  'bodyType:plus_size',
+  'bodyType:average',
 
-/** Number of categorical slots, before the continuous tail. */
-export const CATEGORICAL_DIM = layout.slots.length;
+  'setting:bedroom',
+  'setting:bathroom',
+  'setting:living_room',
+  'setting:kitchen',
+  'setting:outdoor',
+  'setting:pool',
+  'setting:studio',
+  'setting:car',
+  'setting:gym',
+  'setting:office',
+  'setting:other',
+
+  'clothing:lingerie',
+  'clothing:swimwear',
+  'clothing:casual',
+  'clothing:costume',
+  'clothing:uniform',
+  'clothing:partially_nude',
+  'clothing:nude',
+
+  'actType:posing',
+  'actType:dancing',
+  'actType:undressing',
+  'actType:solo_touching',
+  'actType:kissing',
+  'actType:oral',
+  'actType:vaginal',
+  'actType:anal',
+  'actType:manual',
+  'actType:massage',
+  'actType:talking',
+
+  'penetrationType:none',
+  'penetrationType:vaginal',
+  'penetrationType:anal',
+  'penetrationType:oral',
+  'penetrationType:multiple',
+
+  'fetishTags:none',
+  'fetishTags:feet',
+  'fetishTags:bdsm',
+  'fetishTags:latex_leather',
+  'fetishTags:stockings',
+  'fetishTags:roleplay',
+  'fetishTags:cosplay',
+  'fetishTags:tattoos',
+  'fetishTags:piercings',
+  'fetishTags:voyeur',
+  'fetishTags:public',
+
+  'cameraFraming:close_up',
+  'cameraFraming:medium',
+  'cameraFraming:wide',
+  'cameraFraming:pov',
+  'cameraFraming:selfie',
+  'cameraFraming:mixed',
+
+  'explicitness:sfw',
+  'explicitness:suggestive',
+  'explicitness:topless',
+  'explicitness:softcore',
+  'explicitness:hardcore',
+
+  'productionQuality:amateur',
+  'productionQuality:semi_pro',
+  'productionQuality:professional',
+
+  'mood:playful',
+  'mood:sensual',
+  'mood:intense',
+  'mood:romantic',
+  'mood:neutral',
+] as const;
+
+/** Vector dimension. Categorical slots only - no continuous features. */
+export const TAXONOMY_DIM = TAXONOMY_LAYOUT.length;
+
+const slotIndexByTag = new Map<string, number>(
+  TAXONOMY_LAYOUT.map((tag, index) => [tag, index]),
+);
 
 /**
- * Continuous tail dimensions, appended after the categorical slots:
- *   [0] aesthetic score (0..1)
- *   [1] normalised duration (0..1, saturating at 180s)
+ * Fail fast at import time if TAXONOMY and TAXONOMY_LAYOUT disagree - i.e. someone
+ * added a taxonomy value but forgot to append it to the frozen layout. A silent
+ * mismatch here would mean tags that never reach the vector at all.
  */
-export const TAIL_DIM = 2;
+function assertLayoutMatchesTaxonomy(): void {
+  const fromTaxonomy = new Set<string>();
+  for (const key of TAXONOMY_KEYS) {
+    for (const value of TAXONOMY[key].values) fromTaxonomy.add(`${key}:${value}`);
+  }
 
-export const TAXONOMY_DIM = CATEGORICAL_DIM + TAIL_DIM;
+  const missing = [...fromTaxonomy].filter((tag) => !slotIndexByTag.has(tag));
+  const orphaned = TAXONOMY_LAYOUT.filter((tag) => !fromTaxonomy.has(tag));
 
-export function slotIndex(key: TaxonomyKey, value: string): number | undefined {
-  return layout.index.get(`${key}:${value}`);
+  if (missing.length > 0 || orphaned.length > 0) {
+    throw new Error(
+      `TAXONOMY_LAYOUT is out of sync with TAXONOMY (taxonomy v${TAXONOMY_VERSION}).\n` +
+        (missing.length ? `  Missing from layout: ${missing.join(', ')}\n` : '') +
+        (orphaned.length ? `  In layout but not in taxonomy: ${orphaned.join(', ')}\n` : '') +
+        `  Append new tags to the END of TAXONOMY_LAYOUT and bump TAXONOMY_VERSION.`,
+    );
+  }
 }
 
-/** Human-readable name for a vector dimension - powers "why this video?" in the demo. */
+assertLayoutMatchesTaxonomy();
+
+export function slotIndex(key: TaxonomyKey, value: string): number | undefined {
+  return slotIndexByTag.get(`${key}:${value}`);
+}
+
+export function fieldWeight(key: TaxonomyKey): number {
+  return TAXONOMY[key].weight;
+}
+
+/** Human-readable name for a dimension - powers "why this video?" in the demo. */
 export function describeSlot(index: number): string {
-  if (index < CATEGORICAL_DIM) {
-    const slot = TAXONOMY_SLOTS[index]!;
-    return `${slot.key}=${slot.value}`;
-  }
-  return index === CATEGORICAL_DIM ? 'aestheticScore' : 'durationNorm';
+  return TAXONOMY_LAYOUT[index] ?? `dim_${index}`;
 }

@@ -14,6 +14,10 @@ data/tmp/
 data/frames/
 storage/
 
+# Gold labels reference local video ids and describe 18+ content; the process for
+# regenerating them is documented in data/gold/README.md, which IS tracked.
+data/gold/labels.json
+
 # Playwright browser session state (contains auth cookies)
 .auth/
 playwright-report/

@@ -4,38 +4,33 @@ import {
   encodeFeatures,
   explainSimilarity,
   normalize,
+  toTagAffinity,
   topDimensions,
 } from '../../src/analysis/embedding.ts';
-import { TAXONOMY_DIM, slotIndex } from '../../src/analysis/taxonomy.ts';
+import { TAXONOMY_DIM, TAXONOMY_LAYOUT, slotIndex } from '../../src/analysis/taxonomy.ts';
 import { makeFeatures } from '../fixtures.ts';
 
 describe('encodeFeatures', () => {
   it('produces a unit vector of the declared dimension', () => {
-    const vec = encodeFeatures(makeFeatures(), 30);
+    const vec = encodeFeatures(makeFeatures());
     expect(vec).toHaveLength(TAXONOMY_DIM);
-    expect(cosine(vec, vec)).toBeCloseTo(1, 10);
     const magnitude = Math.sqrt(vec.reduce((sum, v) => sum + v * v, 0));
     expect(magnitude).toBeCloseTo(1, 10);
   });
 
   it('is deterministic', () => {
-    expect(encodeFeatures(makeFeatures(), 30)).toEqual(encodeFeatures(makeFeatures(), 30));
+    expect(encodeFeatures(makeFeatures())).toEqual(encodeFeatures(makeFeatures()));
   });
 
   it('lights up the slot matching a tag and leaves others dark', () => {
-    const vec = encodeFeatures(makeFeatures({ hairColor: ['blonde'] }), 30);
-    const blonde = slotIndex('hairColor', 'blonde')!;
-    const red = slotIndex('hairColor', 'red')!;
-    expect(vec[blonde]).toBeGreaterThan(0);
-    expect(vec[red]).toBe(0);
+    const vec = encodeFeatures(makeFeatures({ hairColor: ['blonde'] }));
+    expect(vec[slotIndex('hairColor', 'blonde')!]).toBeGreaterThan(0);
+    expect(vec[slotIndex('hairColor', 'red')!]).toBe(0);
   });
 
   it('scores videos sharing tags above videos sharing none', () => {
-    const blondeBedroom = encodeFeatures(makeFeatures(), 30);
-    const blondeBedroom2 = encodeFeatures(
-      makeFeatures({ mood: 'sensual', aestheticScore: 0.6 }),
-      28,
-    );
+    const a = encodeFeatures(makeFeatures());
+    const similar = encodeFeatures(makeFeatures({ mood: 'sensual' }));
     const different = encodeFeatures(
       makeFeatures({
         hairColor: ['black'],
@@ -46,30 +41,33 @@ describe('encodeFeatures', () => {
         performerCount: 'duo',
         mood: 'intense',
       }),
-      30,
     );
 
-    expect(cosine(blondeBedroom, blondeBedroom2)).toBeGreaterThan(
-      cosine(blondeBedroom, different),
-    );
+    expect(cosine(a, similar)).toBeGreaterThan(cosine(a, different));
   });
 
   it('weights a tag down when the model reports low confidence', () => {
-    const confident = encodeFeatures(makeFeatures({ confidence: { hairColor: 1.0 } }), 30);
-    const unsure = encodeFeatures(makeFeatures({ confidence: { hairColor: 0.1 } }), 30);
+    const confident = encodeFeatures(makeFeatures({ confidence: { hairColor: 1.0 } }));
+    const unsure = encodeFeatures(makeFeatures({ confidence: { hairColor: 0.1 } }));
     const blonde = slotIndex('hairColor', 'blonde')!;
     expect(confident[blonde]!).toBeGreaterThan(unsure[blonde]!);
   });
 
-  it('splits a field\'s weight across multiple selected values', () => {
-    const one = encodeFeatures(makeFeatures({ actType: ['posing'] }), 30);
-    const many = encodeFeatures(
-      makeFeatures({ actType: ['posing', 'dancing', 'undressing'] }),
-      30,
-    );
+  it("splits a field's weight across multiple selected values", () => {
+    const one = encodeFeatures(makeFeatures({ actType: ['posing'] }));
+    const many = encodeFeatures(makeFeatures({ actType: ['posing', 'dancing', 'undressing'] }));
     const posing = slotIndex('actType', 'posing')!;
     // A video tagged with three acts must not outweigh one tagged with a single act.
     expect(many[posing]!).toBeLessThan(one[posing]!);
+  });
+
+  it('ignores continuous signals entirely - they belong to ranking, not similarity', () => {
+    // Two videos with identical tags but wildly different aesthetic scores must be
+    // content-identical. Popularity/quality/freshness are applied in rank.ts.
+    const dull = encodeFeatures(makeFeatures({ aestheticScore: 0.05 }));
+    const stunning = encodeFeatures(makeFeatures({ aestheticScore: 0.99 }));
+    expect(dull).toEqual(stunning);
+    expect(cosine(dull, stunning)).toBeCloseTo(1, 10);
   });
 });
 
@@ -82,13 +80,11 @@ describe('normalize', () => {
 
 describe('explainSimilarity', () => {
   it('names the dimensions driving a match, largest first', () => {
-    const vec = encodeFeatures(makeFeatures(), 30);
+    const vec = encodeFeatures(makeFeatures());
     const contributions = explainSimilarity(vec, vec, 3);
     expect(contributions.length).toBeGreaterThan(0);
-    // Every reported dimension carries a human name, either "field=value" for a
-    // taxonomy slot or a bare name for a continuous one.
     for (const c of contributions) {
-      expect(c.dimension).toMatch(/^(\w+=\w+|aestheticScore|durationNorm)$/);
+      expect(TAXONOMY_LAYOUT).toContain(c.dimension as (typeof TAXONOMY_LAYOUT)[number]);
     }
     for (let i = 1; i < contributions.length; i++) {
       expect(contributions[i - 1]!.contribution).toBeGreaterThanOrEqual(
@@ -100,8 +96,15 @@ describe('explainSimilarity', () => {
 
 describe('topDimensions', () => {
   it('reports the strongest tags in a profile vector', () => {
-    const vec = encodeFeatures(makeFeatures(), 30);
-    const top = topDimensions(vec, 5);
-    expect(top.map((t) => t.dimension)).toContain('actType=posing');
+    const top = topDimensions(encodeFeatures(makeFeatures()), 5);
+    expect(top.map((t) => t.dimension)).toContain('actType:posing');
+  });
+});
+
+describe('toTagAffinity', () => {
+  it('mirrors a vector into named tag weights for SQL candidate generation', () => {
+    const affinity = toTagAffinity(encodeFeatures(makeFeatures()));
+    expect(affinity['hairColor:blonde']).toBeGreaterThan(0);
+    expect(affinity['hairColor:red']).toBeUndefined();
   });
 });
