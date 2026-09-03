@@ -1,0 +1,26 @@
+node_modules/
+dist/
+coverage/
+*.log
+npm-debug.log*
+
+.env
+.env.local
+.env.*.local
+
+# Local media + scratch. Source videos are never committed (size + 18+ content).
+data/seed/
+data/tmp/
+data/frames/
+storage/
+
+# Playwright browser session state (contains auth cookies)
+.auth/
+playwright-report/
+test-results/
+
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
