@@ -3,6 +3,7 @@ import {
   TAXONOMY_DIM,
   TAXONOMY_KEYS,
   describeSlot,
+  isUninformative,
   slotIndex,
 } from './taxonomy.ts';
 import { confidenceFor, type VideoFeatures } from './schema.ts';
@@ -32,6 +33,15 @@ import { confidenceFor, type VideoFeatures } from './schema.ts';
  * HNSW index, and each term's effect on the final score stays separately
  * auditable.
  *
+ * "Unknown" is not a feature
+ * ---------------------------
+ * Values meaning "could not be determined" (see UNINFORMATIVE_VALUES in
+ * taxonomy.ts) keep their layout slot but encode as zero. Two videos whose hair
+ * colour is both undeterminable have nothing in common, and letting `unknown`
+ * match `unknown` would manufacture similarity out of missing information -
+ * concentrating badly-lit or heavily-cropped footage into its own false cluster.
+ * `none` and `other` encode normally: they are real observations.
+ *
  * The cost of a taxonomy-only vector is that anything outside the taxonomy is
  * invisible. The upgrade path (concatenate a text embedding of the caption, or
  * move to a learned two-tower encoder) is discussed in ARCHITECTURE.md.
@@ -44,7 +54,12 @@ export function encodeFeatures(features: VideoFeatures): number[] {
     const field = TAXONOMY[key];
     const confidence = confidenceFor(features, key);
     const raw = features[key];
-    const values: string[] = Array.isArray(raw) ? raw : [raw];
+
+    // De-duplicate: a model returning ["posing", "posing"] must not halve the
+    // per-value share as though it had observed two distinct acts.
+    const values = [...new Set<string>(Array.isArray(raw) ? raw : [raw])].filter(
+      (value) => !isUninformative(value),
+    );
     if (values.length === 0) continue;
 
     // Spread a field's weight across its selected values so a video tagged with

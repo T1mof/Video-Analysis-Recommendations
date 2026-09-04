@@ -42,8 +42,14 @@ const schema = z.object({
 
   // ingestion
   INGEST_MAX_DURATION_SECONDS: int(300),
-  INGEST_REQUIRE_VERTICAL: bool(true),
+  INGEST_MIN_DURATION_SECONDS: num(1),
   INGEST_TMP_DIR: z.string().default('data/tmp'),
+  DEMO_SOURCE_DIR: z.string().default('data/seed/videos'),
+  /** Optional creator attribution for the demo corpus; absent is normal. */
+  DEMO_MANIFEST_PATH: z.string().default('data/seed/manifest.json'),
+  /** Poster frame is taken this far into the video, as a fraction of duration. */
+  POSTER_POSITION_PCT: num(0.15),
+  POSTER_WIDTH: int(360),
 
   // vision provider
   VISION_PROVIDER: z.enum(['mock', 'openai-compatible']).default('mock'),

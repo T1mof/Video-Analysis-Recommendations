@@ -45,6 +45,44 @@ Metadata and analytical features belong in PostgreSQL.
 
 The API should not act as the production video transport layer. At scale, clients obtain CDN-backed object-storage URLs.
 
+### Ingestion and content sources
+
+Ingestion sits behind a `VideoSource` interface. Every source yields the same
+candidate items, and the rest of the pipeline — validation, deduplication, storage,
+analysis — is shared and source-agnostic.
+
+#### Priority: the scraper is not on the critical path
+
+The assignment names Fansly and Fanvue as example sources, but the same task
+statement explicitly allows content from anywhere ("можете взять откуда угодно").
+Per the team lead's clarification, **a full Fansly/Fanvue scraper is not a
+requirement of the MVP**. It is an optional bonus, scheduled last.
+
+The order of work is therefore:
+
+1. **Close the main pipeline end to end first** — local video source → object
+   storage → analysis → features → user profile → recommendations → prepared feed →
+   benchmark → documentation. This is the deliverable being graded.
+2. **`DemoVideoSource` is the source used for the mandatory demonstration**, backed
+   by 20–30 local vertical videos. The demo must never depend on a live third-party
+   site being reachable, unblocked, or logged in.
+3. **Only once the above is complete**, and only if time remains, implement a
+   best-effort `FanslySource` or `FanvueSource` using ordinary Playwright
+   navigation.
+4. **The scraper must never block or delay the main MVP.** If it is unfinished at
+   the deadline, that is an acceptable outcome and is documented as such.
+
+#### Scope limits on the scraper
+
+Should the scraper be attempted, it uses plain browser automation only. It does
+**not** attempt to defeat Cloudflare challenges, solve CAPTCHAs, rotate proxies, or
+otherwise circumvent anti-bot protection. Authentication, where needed, is a
+one-time manual login whose session state is reused.
+
+This is both a scope decision and a deliberate one: anti-bot evasion consumes
+time, produces nothing the evaluator is assessing, and works against the terms of
+the target sites. Ingested material stays local and is not redistributed.
+
 ### Video analysis
 
 The current preferred approach is to preprocess videos before VLM inference.
@@ -290,6 +328,11 @@ Implemented MVP:
 * VLM adapter
 * recommendation implementation
 * Docker Compose
+* `DemoVideoSource` (local videos) — the source the demo runs on
+
+Optional, only if time remains after everything above:
+
+* best-effort `FanslySource` / `FanvueSource` via plain Playwright
 
 Architecture-only scale components:
 

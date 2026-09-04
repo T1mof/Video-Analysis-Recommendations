@@ -73,17 +73,17 @@ describe('summarize', () => {
 describe('goldDatasetSchema', () => {
   it('rejects labels containing a value outside the taxonomy', () => {
     const dataset = {
-      taxonomyVersion: 1,
+      taxonomyVersion: 2,
       reviewedBy: 'reviewer',
       reviewedAt: '2026-09-04',
-      items: [makeGold({ hairColor: ['platinum_blonde'] as never })],
+      items: [makeGold({ hairColor: 'platinum_blonde' as never })],
     };
     expect(goldDatasetSchema.safeParse(dataset).success).toBe(false);
   });
 
   it('accepts a well-formed reviewed dataset', () => {
     const dataset = {
-      taxonomyVersion: 1,
+      taxonomyVersion: 2,
       reviewedBy: 'reviewer',
       reviewedAt: '2026-09-04',
       items: [{ ...makeGold(), note: 'Dim lighting; body type is a judgement call.' }],

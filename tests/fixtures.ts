@@ -1,21 +1,29 @@
 import type { VideoFeatures } from '../src/analysis/schema.ts';
 
-/** A valid, fully-populated feature set. Override fields per test. */
+/** A valid, fully-populated feature set (taxonomy v2). Override fields per test. */
 export function makeFeatures(overrides: Partial<VideoFeatures> = {}): VideoFeatures {
   return {
     performerCount: 'solo',
-    performerGenders: ['female'],
-    hairColor: ['blonde'],
-    bodyType: ['slim'],
+    performerGender: 'female',
+    adultAgeGroup: '25_34',
+    hairColor: 'blonde',
+    bodyType: 'slim',
+    breastSize: 'medium',
+    buttSize: 'medium',
+    penisSize: 'unknown',
+    mediaType: 'live_action',
     setting: 'bedroom',
-    clothing: ['lingerie'],
-    actType: ['posing'],
+    clothing: 'lingerie',
+    sexPosition: 'none',
     penetrationType: 'none',
-    fetishTags: ['stockings'],
-    cameraFraming: 'medium',
+    cameraStyle: 'standard',
     explicitness: 'suggestive',
     productionQuality: 'amateur',
-    mood: 'playful',
+
+    appearanceFeatures: ['tattoos'],
+    actType: ['posing'],
+    fetishTags: ['stockings'],
+
     aestheticScore: 0.7,
     caption: 'A woman poses in lingerie in a bedroom.',
     confidence: {},

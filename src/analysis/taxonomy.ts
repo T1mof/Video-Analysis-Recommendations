@@ -18,10 +18,11 @@
  * similar?") and because separating them lets those weights be re-tuned without
  * re-encoding vectors or rebuilding the HNSW index.
  *
- * Deliberately NOT included: ethnicity/race inference. It is unreliable from a
- * handful of frames, and building a recommender that optimises on inferred race is
- * a liability with no upside here - other axes carry the personalisation signal.
- * See ARCHITECTURE.md "Tradeoffs".
+ * Every categorical field describes APPARENT presentation as visible in the
+ * sampled frames. None of it is a claim about anyone's real identity, and the
+ * taxonomy deliberately carries no ethnicity/race axis: it is unreliable from a
+ * handful of frames and optimising a recommender on inferred race is a liability
+ * with no upside. See ARCHITECTURE.md "Tradeoffs".
  */
 
 /**
@@ -30,12 +31,12 @@
  * detectable rather than silently mixed.
  *
  * A taxonomy version bump that changes TAXONOMY_DIM is NOT a code-only change.
- * The vector dimension is baked into the PostgreSQL column type: a `vector(83)`
- * column physically cannot store an 84-dimensional vector, and pgvector rejects
- * distance operations between vectors of different dimensions. Adding one tag
- * therefore requires, in order:
+ * The vector dimension is baked into the PostgreSQL column type: a `vector(109)`
+ * column physically cannot store a 110-dimensional vector, and pgvector rejects
+ * distance operations between vectors of different dimensions. Changing the
+ * taxonomy therefore requires, in order:
  *
- *   1. schema migration      vector(83) -> vector(84)
+ *   1. schema migration      vector(N) -> vector(M)
  *   2. re-encode every video vector      (video_embeddings)
  *   3. re-encode every user profile      (user_profiles)
  *   4. rebuild the HNSW index
@@ -43,12 +44,18 @@
  * Steps 2 and 3 must both happen: a profile is a sum of video vectors, so a
  * half-migrated system has profiles in the old space scoring videos in the new
  * one. Because raw model output is retained in video_features.raw, re-encoding is
- * a local recompute and does not require re-running the VLM.
+ * a local recompute and does not require re-running the VLM - but a v1 -> v2
+ * rename (e.g. performerGenders -> performerGender) is a semantic change the old
+ * raw output cannot satisfy, so those rows need re-analysis.
  *
- * The full procedure, including how to do it without downtime at scale, is in
- * ARCHITECTURE.md "Taxonomy versioning and re-embedding".
+ * The full procedure is in ARCHITECTURE.md "Taxonomy versioning and re-embedding".
+ *
+ * v2 (current): restructured before the corpus was populated - most multi-value
+ * fields collapsed to single dominant-value fields, `mood` and `cameraFraming`
+ * dropped, body/anatomy/age/media-type axes added. Frozen until the first
+ * benchmark against a real VLM.
  */
-export const TAXONOMY_VERSION = 1;
+export const TAXONOMY_VERSION = 2;
 
 export type FieldKind = 'single' | 'multi';
 
@@ -60,30 +67,75 @@ export interface TaxonomyField {
   readonly description: string;
 }
 
+/**
+ * Values meaning "could not be determined" rather than a real observation.
+ *
+ * These occupy a layout slot (so the mapping stays complete and stable) but are
+ * encoded as zero: two videos whose hair colour is both undeterminable share no
+ * content, and letting `unknown` match `unknown` would manufacture similarity out
+ * of missing information. `none` and `other` are NOT in this set - "no sex
+ * position" and "a setting outside the list" are genuine observations.
+ */
+export const UNINFORMATIVE_VALUES: ReadonlySet<string> = new Set(['unknown']);
+
 export const TAXONOMY = {
+  // ----------------------------------------------------------------- single
   performerCount: {
     kind: 'single',
-    weight: 0.8,
+    weight: 0.6,
     values: ['none', 'solo', 'duo', 'group'],
     description: 'How many people are visible for most of the video',
   },
-  performerGenders: {
-    kind: 'multi',
+  performerGender: {
+    kind: 'single',
     weight: 1.0,
-    values: ['female', 'male', 'trans', 'unknown'],
-    description: 'Apparent gender presentation of the people shown',
+    values: ['female', 'male', 'mixed', 'unknown'],
+    description:
+      'Apparent gender presentation/composition of the people shown; not a claim about real identity',
+  },
+  adultAgeGroup: {
+    kind: 'single',
+    weight: 0.6,
+    values: ['18_24', '25_34', '35_44', '45_plus', 'unknown'],
+    description:
+      'Approximate apparent adult age group of the main performer; all participants are already known to be 18+. Use unknown when in doubt',
   },
   hairColor: {
-    kind: 'multi',
-    weight: 0.9,
-    values: ['blonde', 'brunette', 'black', 'red', 'colored', 'other'],
-    description: 'Hair colour of the main performer(s)',
+    kind: 'single',
+    weight: 0.8,
+    values: ['blonde', 'dark', 'red', 'colored', 'other', 'unknown'],
+    description:
+      'Hair colour of the main performer; dark covers brunette and black, colored means visibly dyed unnatural colours',
   },
   bodyType: {
-    kind: 'multi',
-    weight: 0.7,
-    values: ['slim', 'athletic', 'curvy', 'plus_size', 'average'],
-    description: 'Apparent build of the main performer(s)',
+    kind: 'single',
+    weight: 0.6,
+    values: ['slim', 'athletic', 'curvy', 'plus_size', 'average', 'unknown'],
+    description: 'Apparent build of the main performer',
+  },
+  breastSize: {
+    kind: 'single',
+    weight: 0.5,
+    values: ['small', 'medium', 'large', 'unknown'],
+    description: 'Apparent breast size of the main performer',
+  },
+  buttSize: {
+    kind: 'single',
+    weight: 0.5,
+    values: ['small', 'medium', 'large', 'unknown'],
+    description: 'Apparent butt size of the main performer',
+  },
+  penisSize: {
+    kind: 'single',
+    weight: 0.5,
+    values: ['small', 'medium', 'large', 'unknown'],
+    description: 'Apparent penis size of the main performer, if visible',
+  },
+  mediaType: {
+    kind: 'single',
+    weight: 0.8,
+    values: ['live_action', 'animated', 'other'],
+    description: 'Whether the video is filmed or animated',
   },
   setting: {
     kind: 'single',
@@ -101,13 +153,75 @@ export const TAXONOMY = {
       'office',
       'other',
     ],
-    description: 'Where the video takes place',
+    description: 'Dominant location the video takes place in',
   },
   clothing: {
-    kind: 'multi',
+    kind: 'single',
+    weight: 0.7,
+    values: [
+      'lingerie',
+      'swimwear',
+      'casual',
+      'costume',
+      'uniform',
+      'partially_nude',
+      'nude',
+      'other',
+      'unknown',
+    ],
+    description: 'Dominant clothing state of the main performer',
+  },
+  sexPosition: {
+    kind: 'single',
+    weight: 1.0,
+    values: [
+      'none',
+      'riding',
+      'reverse_riding',
+      'missionary',
+      'doggy',
+      'standing',
+      'side',
+      'other',
+      'mixed',
+      'unknown',
+    ],
+    description:
+      'Dominant sex position; mixed when several occupy a significant part of the video with no dominant one, none when there is no sex position',
+  },
+  penetrationType: {
+    kind: 'single',
+    weight: 1.1,
+    values: ['none', 'vaginal', 'anal', 'double_penetration', 'mixed', 'other', 'unknown'],
+    description:
+      'Type of penetration shown; double_penetration means simultaneous, mixed means different types at different moments',
+  },
+  cameraStyle: {
+    kind: 'single',
+    weight: 0.4,
+    values: ['standard', 'pov', 'selfie', 'mixed'],
+    description: 'How the video is shot',
+  },
+  explicitness: {
+    kind: 'single',
     weight: 0.9,
-    values: ['lingerie', 'swimwear', 'casual', 'costume', 'uniform', 'partially_nude', 'nude'],
-    description: 'What the performer(s) are wearing',
+    values: ['sfw', 'suggestive', 'nudity', 'explicit'],
+    description:
+      'sfw = ordinary safe content; suggestive = sexualised without explicit nudity or sex act; nudity = nudity without an explicit sex act; explicit = explicit sex act',
+  },
+  productionQuality: {
+    kind: 'single',
+    weight: 0.3,
+    values: ['amateur', 'semi_pro', 'professional', 'unknown'],
+    description: 'Apparent production value',
+  },
+
+  // ------------------------------------------------------------------ multi
+  appearanceFeatures: {
+    kind: 'multi',
+    weight: 0.5,
+    values: ['tattoos', 'piercings'],
+    description: 'Visible body modifications; empty array if none',
   },
   actType: {
     kind: 'multi',
@@ -119,61 +233,29 @@ export const TAXONOMY = {
       'solo_touching',
       'kissing',
       'oral',
-      'vaginal',
-      'anal',
       'manual',
+      'toy_use',
       'massage',
       'talking',
+      'penetrative_sex',
     ],
-    description: 'What is happening in the video',
-  },
-  penetrationType: {
-    kind: 'single',
-    weight: 1.1,
-    values: ['none', 'vaginal', 'anal', 'oral', 'multiple'],
-    description: 'Type of penetration shown, if any',
+    description:
+      'What is happening in the video; the specific penetration type belongs in penetrationType, not here',
   },
   fetishTags: {
     kind: 'multi',
     weight: 1.0,
     values: [
-      'none',
       'feet',
       'bdsm',
       'latex_leather',
       'stockings',
       'roleplay',
       'cosplay',
-      'tattoos',
-      'piercings',
       'voyeur',
       'public',
     ],
-    description: 'Recognisable fetish or niche themes',
-  },
-  cameraFraming: {
-    kind: 'single',
-    weight: 0.5,
-    values: ['close_up', 'medium', 'wide', 'pov', 'selfie', 'mixed'],
-    description: 'Dominant camera framing',
-  },
-  explicitness: {
-    kind: 'single',
-    weight: 1.0,
-    values: ['sfw', 'suggestive', 'topless', 'softcore', 'hardcore'],
-    description: 'How explicit the content is overall',
-  },
-  productionQuality: {
-    kind: 'single',
-    weight: 0.4,
-    values: ['amateur', 'semi_pro', 'professional'],
-    description: 'Apparent production value',
-  },
-  mood: {
-    kind: 'single',
-    weight: 0.5,
-    values: ['playful', 'sensual', 'intense', 'romantic', 'neutral'],
-    description: 'Overall tone',
+    description: 'Recognisable fetish or niche themes; empty array if none',
   },
 } as const satisfies Record<string, TaxonomyField>;
 
@@ -185,7 +267,7 @@ export const TAXONOMY_KEYS = Object.keys(TAXONOMY) as TaxonomyKey[];
 export type ValueOf<K extends TaxonomyKey> = Taxonomy[K]['values'][number];
 
 /**
- * FROZEN tag -> dimension mapping for TAXONOMY_VERSION 1.
+ * FROZEN tag -> dimension mapping for TAXONOMY_VERSION 2.
  *
  * Written out explicitly rather than derived from object key order, because
  * object order is an accident of declaration: reordering a field above would
@@ -196,6 +278,12 @@ export type ValueOf<K extends TaxonomyKey> = Taxonomy[K]['values'][number];
  * Never insert or reorder. Appending keeps existing dimensions stable but still
  * changes TAXONOMY_DIM, which requires the full migration + re-embedding procedure
  * documented on TAXONOMY_VERSION above - it is not a code-only change.
+ *
+ * The one exception was v2 itself, assembled here in grouped order while the corpus
+ * was still empty and no vector had ever been persisted. From this point the array
+ * is append-only: `productionQuality:unknown` sits inside its field's block, which
+ * would have been illegal against live data because it shifts every dimension after
+ * it.
  */
 export const TAXONOMY_LAYOUT = [
   'performerCount:none',
@@ -203,23 +291,49 @@ export const TAXONOMY_LAYOUT = [
   'performerCount:duo',
   'performerCount:group',
 
-  'performerGenders:female',
-  'performerGenders:male',
-  'performerGenders:trans',
-  'performerGenders:unknown',
+  'performerGender:female',
+  'performerGender:male',
+  'performerGender:mixed',
+  'performerGender:unknown',
+
+  'adultAgeGroup:18_24',
+  'adultAgeGroup:25_34',
+  'adultAgeGroup:35_44',
+  'adultAgeGroup:45_plus',
+  'adultAgeGroup:unknown',
 
   'hairColor:blonde',
-  'hairColor:brunette',
-  'hairColor:black',
+  'hairColor:dark',
   'hairColor:red',
   'hairColor:colored',
   'hairColor:other',
+  'hairColor:unknown',
 
   'bodyType:slim',
   'bodyType:athletic',
   'bodyType:curvy',
   'bodyType:plus_size',
   'bodyType:average',
+  'bodyType:unknown',
+
+  'breastSize:small',
+  'breastSize:medium',
+  'breastSize:large',
+  'breastSize:unknown',
+
+  'buttSize:small',
+  'buttSize:medium',
+  'buttSize:large',
+  'buttSize:unknown',
+
+  'penisSize:small',
+  'penisSize:medium',
+  'penisSize:large',
+  'penisSize:unknown',
+
+  'mediaType:live_action',
+  'mediaType:animated',
+  'mediaType:other',
 
   'setting:bedroom',
   'setting:bathroom',
@@ -240,6 +354,45 @@ export const TAXONOMY_LAYOUT = [
   'clothing:uniform',
   'clothing:partially_nude',
   'clothing:nude',
+  'clothing:other',
+  'clothing:unknown',
+
+  'sexPosition:none',
+  'sexPosition:riding',
+  'sexPosition:reverse_riding',
+  'sexPosition:missionary',
+  'sexPosition:doggy',
+  'sexPosition:standing',
+  'sexPosition:side',
+  'sexPosition:other',
+  'sexPosition:mixed',
+  'sexPosition:unknown',
+
+  'penetrationType:none',
+  'penetrationType:vaginal',
+  'penetrationType:anal',
+  'penetrationType:double_penetration',
+  'penetrationType:mixed',
+  'penetrationType:other',
+  'penetrationType:unknown',
+
+  'cameraStyle:standard',
+  'cameraStyle:pov',
+  'cameraStyle:selfie',
+  'cameraStyle:mixed',
+
+  'explicitness:sfw',
+  'explicitness:suggestive',
+  'explicitness:nudity',
+  'explicitness:explicit',
+
+  'productionQuality:amateur',
+  'productionQuality:semi_pro',
+  'productionQuality:professional',
+  'productionQuality:unknown',
+
+  'appearanceFeatures:tattoos',
+  'appearanceFeatures:piercings',
 
   'actType:posing',
   'actType:dancing',
@@ -247,52 +400,20 @@ export const TAXONOMY_LAYOUT = [
   'actType:solo_touching',
   'actType:kissing',
   'actType:oral',
-  'actType:vaginal',
-  'actType:anal',
   'actType:manual',
+  'actType:toy_use',
   'actType:massage',
   'actType:talking',
+  'actType:penetrative_sex',
 
-  'penetrationType:none',
-  'penetrationType:vaginal',
-  'penetrationType:anal',
-  'penetrationType:oral',
-  'penetrationType:multiple',
-
-  'fetishTags:none',
   'fetishTags:feet',
   'fetishTags:bdsm',
   'fetishTags:latex_leather',
   'fetishTags:stockings',
   'fetishTags:roleplay',
   'fetishTags:cosplay',
-  'fetishTags:tattoos',
-  'fetishTags:piercings',
   'fetishTags:voyeur',
   'fetishTags:public',
-
-  'cameraFraming:close_up',
-  'cameraFraming:medium',
-  'cameraFraming:wide',
-  'cameraFraming:pov',
-  'cameraFraming:selfie',
-  'cameraFraming:mixed',
-
-  'explicitness:sfw',
-  'explicitness:suggestive',
-  'explicitness:topless',
-  'explicitness:softcore',
-  'explicitness:hardcore',
-
-  'productionQuality:amateur',
-  'productionQuality:semi_pro',
-  'productionQuality:professional',
-
-  'mood:playful',
-  'mood:sensual',
-  'mood:intense',
-  'mood:romantic',
-  'mood:neutral',
 ] as const;
 
 /** Vector dimension. Categorical slots only - no continuous features. */
@@ -324,6 +445,10 @@ function assertLayoutMatchesTaxonomy(): void {
         `  Append new tags to the END of TAXONOMY_LAYOUT and bump TAXONOMY_VERSION.`,
     );
   }
+
+  if (slotIndexByTag.size !== TAXONOMY_LAYOUT.length) {
+    throw new Error(`TAXONOMY_LAYOUT contains duplicate entries (taxonomy v${TAXONOMY_VERSION}).`);
+  }
 }
 
 assertLayoutMatchesTaxonomy();
@@ -334,6 +459,11 @@ export function slotIndex(key: TaxonomyKey, value: string): number | undefined {
 
 export function fieldWeight(key: TaxonomyKey): number {
   return TAXONOMY[key].weight;
+}
+
+/** True for values that mean "could not be determined" - encoded as zero. */
+export function isUninformative(value: string): boolean {
+  return UNINFORMATIVE_VALUES.has(value);
 }
 
 /** Human-readable name for a dimension - powers "why this video?" in the demo. */

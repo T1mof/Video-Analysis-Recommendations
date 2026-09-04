@@ -9,7 +9,11 @@ npm-debug.log*
 .env.*.local
 
 # Local media + scratch. Source videos are never committed (size + 18+ content).
-data/seed/
+# The manifest and README are metadata about the corpus, not the corpus, so they
+# stay tracked; mapping.json holds per-database UUIDs and is regenerated.
+data/seed/*
+!data/seed/README.md
+!data/seed/manifest.json
 data/tmp/
 data/frames/
 storage/

@@ -11,9 +11,38 @@ describe('videoFeaturesSchema', () => {
 
   it('rejects a hallucinated tag outside the taxonomy', () => {
     const result = videoFeaturesSchema.safeParse(
-      makeFeatures({ hairColor: ['platinum_blonde'] as never }),
+      makeFeatures({ hairColor: 'platinum_blonde' as never }),
     );
     expect(result.success).toBe(false);
+  });
+
+  it('rejects a v1 value that taxonomy v2 removed', () => {
+    expect(
+      videoFeaturesSchema.safeParse(makeFeatures({ hairColor: 'brunette' as never })).success,
+    ).toBe(false);
+    expect(
+      videoFeaturesSchema.safeParse(makeFeatures({ explicitness: 'hardcore' as never })).success,
+    ).toBe(false);
+  });
+
+  it('rejects an array where taxonomy v2 expects a single value', () => {
+    const result = videoFeaturesSchema.safeParse(
+      makeFeatures({ clothing: ['lingerie'] as never }),
+    );
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects a missing required field', () => {
+    const input = makeFeatures();
+    delete (input as Partial<typeof input>).sexPosition;
+    expect(videoFeaturesSchema.safeParse(input).success).toBe(false);
+  });
+
+  it('accepts "unknown" wherever the taxonomy offers it', () => {
+    const result = videoFeaturesSchema.safeParse(
+      makeFeatures({ hairColor: 'unknown', bodyType: 'unknown', adultAgeGroup: 'unknown' }),
+    );
+    expect(result.success).toBe(true);
   });
 
   it('rejects an out-of-range aesthetic score', () => {
@@ -44,6 +73,16 @@ describe('jsonSchemaForFeatures', () => {
       expect.arrayContaining(['aestheticScore', 'caption', 'confidence']),
     );
   });
+
+  it('mirrors taxonomy cardinality: string for single, array for multi', () => {
+    const json = jsonSchemaForFeatures() as {
+      properties: Record<string, { type: string; enum?: string[]; items?: { enum: string[] } }>;
+    };
+    expect(json.properties.clothing?.type).toBe('string');
+    expect(json.properties.clothing?.enum).toContain('partially_nude');
+    expect(json.properties.actType?.type).toBe('array');
+    expect(json.properties.actType?.items?.enum).toContain('penetrative_sex');
+  });
 });
 
 describe('buildPrompt', () => {
@@ -58,6 +97,19 @@ describe('buildPrompt', () => {
     for (const key of TAXONOMY_KEYS) {
       expect(prompt).toContain(key);
     }
-    expect(prompt).toContain('blonde, brunette, black, red, colored, other');
+    expect(prompt).toContain('blonde, dark, red, colored, other, unknown');
+  });
+
+  it('separates single-value from multi-value instructions', () => {
+    const prompt = buildPrompt(8, 32.5);
+    expect(prompt).toContain('SINGLE-VALUE fields');
+    expect(prompt).toContain('MULTI-VALUE fields');
+    expect(prompt).toContain('[] is valid');
+  });
+
+  it('tells the model to use unknown rather than guess', () => {
+    const prompt = buildPrompt(8, 32.5);
+    expect(prompt).toContain('Do not guess');
+    expect(prompt).toContain('dominant performer');
   });
 });

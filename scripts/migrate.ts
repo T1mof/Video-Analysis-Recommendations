@@ -21,8 +21,8 @@ async function main(): Promise<void> {
 
 /**
  * The vector dimension lives in two places that can drift: TAXONOMY_LAYOUT in the
- * code, and the PostgreSQL column type. A `vector(83)` column cannot store an
- * 84-dimensional vector, and pgvector refuses distance operations across
+ * code, and the PostgreSQL column type. A `vector(N)` column cannot store an
+ * (N+1)-dimensional vector, and pgvector refuses distance operations across
  * mismatched dimensions - so a drift here surfaces as confusing insert/query
  * failures much later. Check it at migrate time and say exactly what to do.
  */
@@ -36,7 +36,30 @@ async function assertVectorDimensions(): Promise<void> {
       AND c.relname IN ('video_embeddings', 'user_profiles')
   `);
 
-  const mismatches = [...rows].filter((row) => row.type !== `vector(${TAXONOMY_DIM})`);
+  const found = [...rows];
+
+  // Finding nothing is a failure, not a pass. It means the migrations did not
+  // actually create the tables - which happens if the `public` schema is dropped
+  // while drizzle's own `drizzle.__drizzle_migrations` journal survives: drizzle
+  // then believes every migration is already applied and quietly creates nothing.
+  // A vacuous "verified" here would hide an empty database.
+  const expected = ['user_profiles', 'video_embeddings'];
+  const missing = expected.filter((table) => !found.some((r) => r.table_name === table));
+
+  if (missing.length > 0) {
+    throw new Error(
+      `Expected an "embedding" column on ${expected.join(' and ')}, but ` +
+        `${missing.join(' and ')} ${missing.length === 1 ? 'is' : 'are'} missing.\n\n` +
+        `The migration journal and the schema disagree - most likely the schema was ` +
+        `dropped without dropping drizzle's journal, so nothing was re-created.\n` +
+        `Recover with a full reset:\n` +
+        `  docker compose exec -T postgres psql -U app -d videorec \\\n` +
+        `    -c "DROP SCHEMA IF EXISTS public CASCADE; DROP SCHEMA IF EXISTS drizzle CASCADE; CREATE SCHEMA public;"\n` +
+        `  npm run db:migrate`,
+    );
+  }
+
+  const mismatches = found.filter((row) => row.type !== `vector(${TAXONOMY_DIM})`);
 
   if (mismatches.length > 0) {
     const detail = mismatches.map((r) => `  ${r.table_name}: ${r.type}`).join('\n');
