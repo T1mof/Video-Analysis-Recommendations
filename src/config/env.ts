@@ -86,8 +86,12 @@ const schema = z.object({
   RANK_W_POPULARITY: num(0.25),
   RANK_W_FATIGUE: num(0.35),
   RANK_W_EXPLORATION: num(0.1),
+  RANK_W_CREATOR_AFFINITY: num(0.2),
   DIVERSITY_LAMBDA: num(0.3),
+  // Two independent diversity rules. The tag cap works on every video; the creator
+  // cap only applies to videos that actually have a creatorId (it is nullable).
   DIVERSITY_MAX_SAME_TAG_IN_TOP10: int(3),
+  DIVERSITY_MAX_SAME_CREATOR: int(2),
 
   // user profile
   PROFILE_HALFLIFE_DAYS: num(7),

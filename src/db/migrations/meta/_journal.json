@@ -8,6 +8,13 @@
       "when": 1788479083780,
       "tag": "0000_glorious_madrox",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788486009279,
+      "tag": "0001_nifty_talisman",
+      "breakpoints": true
     }
   ]
 }

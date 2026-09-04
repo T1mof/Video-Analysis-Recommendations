@@ -161,6 +161,13 @@ User behavior should include signals such as:
 
 Maintain a user preference/profile representation that can be updated from those signals.
 
+Rules:
+
+1. Candidate generation must always be multi-source.
+2. Filtering, ranking and diversity must remain separate stages.
+3. Do not add a complex ML ranker to the MVP.
+4. Do not run heavy recommendation work in the HTTP hot path.
+
 ## Feed serving
 
 The heavy recommendation work should not run synchronously on the main request path.

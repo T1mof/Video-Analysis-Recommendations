@@ -42,6 +42,15 @@ export const videos = pgTable(
     source: text('source').notNull(),
     sourceUrl: text('source_url'),
     externalId: text('external_id'),
+    /**
+     * Creator attribution, both nullable: a local file or an anonymised source
+     * legitimately has no known creator. There is deliberately no creators table
+     * in the MVP - these two columns are all that creator affinity (ranking) and
+     * the per-creator repeat cap (diversity) need. Rows with a null creatorId are
+     * simply exempt from the cap.
+     */
+    creatorId: text('creator_id'),
+    creatorHandle: text('creator_handle'),
     /** Object key in S3/MinIO. The API never proxies bytes; it presigns this. */
     s3Key: text('s3_key').notNull(),
     thumbKey: text('thumb_key'),
@@ -60,6 +69,7 @@ export const videos = pgTable(
     uniqueIndex('videos_checksum_uniq').on(t.checksum),
     index('videos_status_idx').on(t.status),
     index('videos_created_at_idx').on(t.createdAt.desc()),
+    index('videos_creator_idx').on(t.creatorId),
   ],
 );
 

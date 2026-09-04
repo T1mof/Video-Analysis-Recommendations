@@ -13,6 +13,7 @@ The system keeps two distinct kinds of signal apart, on purpose.
 |---|---|---|
 | **Answers** | "Is this the same *kind* of content?" | "Is this item good, fresh, or right for this user now?" |
 | **Contents** | Taxonomy features only | `aestheticScore`, `duration`, `freshness`, `popularity`, `creatorAffinity`, tag fatigue, exploration bonus |
+| **Backed by** | `TAXONOMY_LAYOUT`, frozen per version | Columns on `videos` / `video_stats` / `video_features` |
 | **Storage** | `vector(83)` in pgvector, HNSW cosine | Columns in `video_stats` / `video_features`, read at rank time |
 | **Used by** | Candidate generation (kNN) | Ranking stage, after candidates are retrieved |
 | **Changing it costs** | Migration + full re-embedding (below) | Editing a weight in `.env` |
@@ -33,6 +34,15 @@ weighted sum of the vectors of videos the user engaged with), which is what make
 `explainSimilarity()` possible: a dot product decomposes back into named tag
 contributions, so the feed can show *why* an item was chosen rather than a bare
 score.
+
+**Creator attribution.** `videos.creatorId` and `videos.creatorHandle` are both
+nullable, and there is no `creators` table in the MVP: two columns are all that
+creator affinity (ranking) and the per-creator repeat cap (diversity) consume, so a
+join table would be structure with no current reader. Sources that cannot determine
+a creator store `null`, which is an expected state — those videos are exempt from the
+creator cap and contribute nothing to creator affinity. Because the tag-similarity
+diversity rule is independent and applies to every video, diversification still works
+for a corpus with no creator metadata at all.
 
 **Known limitation.** A taxonomy-only vector cannot represent nuance outside the
 taxonomy. The upgrade path is to concatenate a text embedding of the VLM caption,

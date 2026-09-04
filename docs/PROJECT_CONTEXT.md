@@ -117,23 +117,109 @@ This optimization is lower priority than building the basic VLM pipeline.
 
 ### Recommendation system
 
-The recommendation architecture should be two-stage.
+The pipeline has four distinct stages, kept separate so each can be reasoned about,
+tuned and replaced on its own:
 
-Candidate generation narrows the corpus from potentially millions of videos to a manageable candidate set.
+```
+multi-source candidate generation
+        → union
+        → deduplication
+        → filtering
+        → weighted ranking
+        → diversification
+```
 
-Possible candidate sources:
+The overall shape is inspired by the publicly described approach of X: retrieve from
+several independent candidate sources, filter, score, then diversify. The learned
+components of that design are deliberately not reproduced here — see "Ranking".
 
-* vector/content similarity;
-* affinity based on historical interactions;
-* trending;
-* fresh content;
-* exploration.
+#### 1. Candidate generation
 
-Ranking then produces the final ordered feed.
+Candidate generation narrows the corpus from potentially millions of videos to a
+manageable candidate set. It is always **multi-source**; no single source decides
+the feed. The five sources:
 
-Initial ranking may use a transparent weighted scoring model rather than immediately building a learned ranking model.
+* **vector similarity** — taxonomy-vector nearest neighbours to the user profile;
+* **explicit tag affinity** — direct lookup on the user's strongest preferred tags;
+* **popular**;
+* **fresh**;
+* **exploration** — a small pool for discovering interests the profile does not yet reflect.
 
-The architecture must allow a learned ranker to replace it later.
+Vector similarity and tag affinity overlap but are not redundant: the first
+generalises to tag combinations the user has never seen, the second is exact,
+explainable, and keeps working if the vector index is unavailable.
+
+Every source returns nothing more than a **plain set of candidate video ids**. No
+source filters, scores, or orders — those are common stages that run once,
+afterwards, over the merged set. Each source is independently capped, so one source
+degrading or returning nothing cannot starve the feed.
+
+#### 2. Union and deduplication
+
+Sources are merged into one set, and a video surfaced by several sources collapses
+to a single candidate (retaining which sources produced it, for debugging and for
+the demo panel).
+
+#### 3. Filtering
+
+A separate stage over the merged set, not something folded into each source. It
+removes candidates that must never reach ranking:
+
+* already seen by this user;
+* **any video whose status is not `analyzed`** — an unanalyzed video has no features
+  and therefore cannot be ranked. This single rule also covers ingested-but-pending,
+  failed, and in-progress videos, which is why no separate `unavailable` status
+  exists.
+
+Keeping this separate means an exclusion rule is written once rather than repeated
+in every candidate query, and the filtered-out counts are observable per reason.
+
+#### 4. Ranking
+
+A transparent weighted scoring model, not a learned ranker.
+
+Numeric signals — popularity, freshness, creator affinity, duration, quality prior —
+are applied **here**, not inside the taxonomy vector. The vector answers "is this the
+same kind of content?"; ranking answers "is this item good, and right for this user
+now?". Separating them also means ranking weights can be re-tuned without re-encoding
+any vectors.
+
+A learned ranker remains a later replacement for this stage; the interface is chosen
+so it can drop in without disturbing candidate generation.
+
+#### 5. Diversification
+
+Applied after ranking, deliberately simple. **Two independent rules**, not one:
+
+* **cap repeats of the same creator** in the returned window;
+* **penalise consecutive videos with overly similar tags**.
+
+They are kept separate because they fail differently. A feed can show ten different
+creators shooting near-identical content, or one creator across genuinely varied
+content; only one rule catches each case.
+
+Creator attribution is nullable (see "Creators" below), so the creator cap applies
+only to videos that actually carry a `creatorId`. The tag rule applies to everything
+and is what keeps diversification working for sources with no creator metadata.
+
+Without this stage the ranker converges on a narrow slice of the catalogue and the
+feed becomes monotonous even though every individual item scores well.
+
+#### Creators
+
+`videos` carries two nullable columns, `creatorId` and `creatorHandle`. There is
+**no creators table in the MVP** — these two columns are everything creator affinity
+and the per-creator cap require, and a join table would be architecture without a
+current consumer.
+
+Sources that cannot determine a creator store both as `null`. That is an expected
+state, not a defect: such videos are simply exempt from the creator cap and
+contribute nothing to creator affinity.
+
+#### Cold start
+
+A user with no history is served a cold-start feed of popular, fresh and
+deliberately diverse videos. The profile takes over as interactions accumulate.
 
 ### User signals
 
@@ -148,6 +234,17 @@ Useful implicit and explicit feedback includes:
 * skip.
 
 These signals update the user profile asynchronously.
+
+Feedback is **bidirectional**: the profile moves in both directions rather than only
+accumulating positives.
+
+* Positive signals — `like`, a high watch ratio, `complete` — strengthen the
+  corresponding preferences.
+* Negative signals — `skip`, a low watch ratio — weaken them.
+
+A positive-only profile drifts toward whatever the user has already been shown and
+can never recover from a bad recommendation streak, because there is no mechanism
+that pushes a preference back down.
 
 ### Serving 3k RPS
 
