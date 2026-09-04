@@ -8,7 +8,7 @@ import {
 import { confidenceFor, type VideoFeatures } from './schema.ts';
 
 /**
- * Deterministic taxonomy embedding - CATEGORICAL DIMENSIONS ONLY.
+ * Deterministic taxonomy embedding - the CONTENT vector.
  *
  * A confidence-weighted multi-hot encoding of the closed taxonomy: no second
  * model, no GPU, no drift between runs. Because a user profile is built in the
@@ -16,15 +16,23 @@ import { confidenceFor, type VideoFeatures } from './schema.ts';
  * into named tag contributions, so the demo can answer "why was this
  * recommended?" with real dimension names.
  *
- * What is NOT in here, on purpose: aestheticScore, duration, popularity,
- * freshness. Those are continuous quality/context signals, not content identity.
- * Folding them into the vector would corrupt the meaning of cosine similarity -
- * two unrelated videos would look "similar" merely for being equally popular or
- * equally long. They are applied as separate weighted terms at the ranking stage
- * (../recommend/rank.ts), where they can be tuned independently and where their
- * effect stays auditable.
+ * Two-tier feature split
+ * ----------------------
+ * Content vector (here):   taxonomy features only.
+ * Ranking features (rank.ts): aestheticScore, duration, freshness, popularity,
+ *                             creatorAffinity, tag fatigue, exploration bonus.
  *
- * The cost of a categorical-only vector is that anything outside the taxonomy is
+ * To be precise about why: continuous features *can* be embedded in a vector
+ * given sensible normalisation and weighting - there is nothing mathematically
+ * wrong with it. The reason they are excluded here is semantic rather than
+ * mathematical. "How similar is this content?" and "how good/fresh/popular is
+ * this item?" are different questions, and a single cosine score cannot answer
+ * both while remaining tunable. Keeping them apart means the quality and recency
+ * weights can be re-tuned without re-encoding a single vector or rebuilding the
+ * HNSW index, and each term's effect on the final score stays separately
+ * auditable.
+ *
+ * The cost of a taxonomy-only vector is that anything outside the taxonomy is
  * invisible. The upgrade path (concatenate a text embedding of the caption, or
  * move to a learned two-tower encoder) is discussed in ARCHITECTURE.md.
  */

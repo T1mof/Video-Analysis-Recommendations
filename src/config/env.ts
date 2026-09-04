@@ -98,14 +98,13 @@ const schema = z.object({
   FEED_TTL_SECONDS: int(3600),
   FEED_REFILL_WATERMARK: int(10),
   /**
-   * Demo-only escape hatch: build a feed on the request path when the cache is
-   * empty. Off by default - the intended flow is prewarm at seed time plus the
-   * explicit rebuild endpoint, so the hot path stays Redis-only as the 3k RPS
-   * design requires. When enabled it is hard-bounded by the timeout below and
-   * degrades to a trending feed rather than blocking.
+   * Precomputed global trending feed, refreshed on a timer by a background worker.
+   * It is what a personalised-feed cache miss is served from, so the request path
+   * is Redis-only unconditionally - there is no code path from an HTTP request to
+   * pgvector or to the ranker. See ARCHITECTURE.md "Serving 3k RPS".
    */
-  FEED_SYNC_FALLBACK: bool(false),
-  FEED_SYNC_FALLBACK_TIMEOUT_MS: int(750),
+  TRENDING_FEED_SIZE: int(100),
+  TRENDING_FEED_REFRESH_SECONDS: int(300),
 
   // workers
   ANALYSIS_CONCURRENCY: int(2),

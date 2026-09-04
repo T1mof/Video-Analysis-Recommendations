@@ -61,9 +61,10 @@ describe('encodeFeatures', () => {
     expect(many[posing]!).toBeLessThan(one[posing]!);
   });
 
-  it('ignores continuous signals entirely - they belong to ranking, not similarity', () => {
-    // Two videos with identical tags but wildly different aesthetic scores must be
-    // content-identical. Popularity/quality/freshness are applied in rank.ts.
+  it('carries content only - ranking-stage signals do not enter the vector', () => {
+    // Two videos with identical tags but wildly different aesthetic scores are
+    // content-identical. Quality/freshness/popularity are scored in rank.ts, so
+    // their weights can change without re-encoding vectors or rebuilding HNSW.
     const dull = encodeFeatures(makeFeatures({ aestheticScore: 0.05 }));
     const stunning = encodeFeatures(makeFeatures({ aestheticScore: 0.99 }));
     expect(dull).toEqual(stunning);

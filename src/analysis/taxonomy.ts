@@ -10,12 +10,13 @@
  *     models incomparable - which would break scripts/bench-vlm.ts.
  *  3. Recommendations become explainable: every dimension has a name.
  *
- * The embedding is CATEGORICAL ONLY. Continuous signals - aesthetic score,
- * duration, popularity, freshness - are deliberately kept out of the vector and
- * applied at the ranking stage instead (see ../recommend/rank.ts). Mixing them in
- * would make cosine similarity mean "similar content AND similar popularity",
- * which is not a meaningful notion of content similarity and would let a popular
- * video look topically close to an unrelated popular one.
+ * The embedding carries taxonomy features only. Continuous signals - aesthetic
+ * score, duration, popularity, freshness, creator affinity - are applied at the
+ * ranking stage instead (see ../recommend/rank.ts). They could be embedded here
+ * with appropriate normalisation; they are kept separate because they answer a
+ * different question ("is this item good/fresh?" rather than "is this content
+ * similar?") and because separating them lets those weights be re-tuned without
+ * re-encoding vectors or rebuilding the HNSW index.
  *
  * Deliberately NOT included: ethnicity/race inference. It is unreliable from a
  * handful of frames, and building a recommender that optimises on inferred race is
@@ -25,8 +26,27 @@
 
 /**
  * Bump whenever TAXONOMY_LAYOUT changes in any way (added value, removed value,
- * reordered). Stored on every embedding row so stale vectors are detectable
- * rather than silently mismatched.
+ * reordered). Stored on every embedding row so vectors from different spaces are
+ * detectable rather than silently mixed.
+ *
+ * A taxonomy version bump that changes TAXONOMY_DIM is NOT a code-only change.
+ * The vector dimension is baked into the PostgreSQL column type: a `vector(83)`
+ * column physically cannot store an 84-dimensional vector, and pgvector rejects
+ * distance operations between vectors of different dimensions. Adding one tag
+ * therefore requires, in order:
+ *
+ *   1. schema migration      vector(83) -> vector(84)
+ *   2. re-encode every video vector      (video_embeddings)
+ *   3. re-encode every user profile      (user_profiles)
+ *   4. rebuild the HNSW index
+ *
+ * Steps 2 and 3 must both happen: a profile is a sum of video vectors, so a
+ * half-migrated system has profiles in the old space scoring videos in the new
+ * one. Because raw model output is retained in video_features.raw, re-encoding is
+ * a local recompute and does not require re-running the VLM.
+ *
+ * The full procedure, including how to do it without downtime at scale, is in
+ * ARCHITECTURE.md "Taxonomy versioning and re-embedding".
  */
 export const TAXONOMY_VERSION = 1;
 
@@ -172,8 +192,10 @@ export type ValueOf<K extends TaxonomyKey> = Taxonomy[K]['values'][number];
  * silently shift every dimension after it and quietly invalidate every stored
  * embedding. Index in this array IS the vector dimension, permanently.
  *
- * To change the taxonomy: append new entries at the END, bump TAXONOMY_VERSION,
- * and re-encode. Never insert or reorder.
+ * To change the taxonomy: append new entries at the END and bump TAXONOMY_VERSION.
+ * Never insert or reorder. Appending keeps existing dimensions stable but still
+ * changes TAXONOMY_DIM, which requires the full migration + re-embedding procedure
+ * documented on TAXONOMY_VERSION above - it is not a code-only change.
  */
 export const TAXONOMY_LAYOUT = [
   'performerCount:none',
