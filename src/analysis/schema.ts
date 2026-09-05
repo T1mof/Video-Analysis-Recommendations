@@ -17,6 +17,13 @@ import { TAXONOMY, TAXONOMY_KEYS, TAXONOMY_VERSION, type TaxonomyKey } from './t
  * penetrationType).
  */
 
+/**
+ * Bump whenever buildPrompt() changes in a way that could alter model output.
+ * Stored per row so features produced by different prompts stay comparable - a
+ * benchmark that mixes prompt versions measures the prompt, not the model.
+ */
+export const PROMPT_VERSION = 2;
+
 const single = <K extends TaxonomyKey>(key: K) => z.enum(TAXONOMY[key].values);
 const multi = <K extends TaxonomyKey>(key: K) =>
   z.array(z.enum(TAXONOMY[key].values)).max(TAXONOMY[key].values.length);
@@ -105,7 +112,15 @@ export function jsonSchemaForFeatures(): Record<string, unknown> {
   };
 }
 
-/** The instruction sent alongside the sampled frames. */
+/**
+ * The instruction sent alongside the sampled frames.
+ *
+ * Built from the taxonomy so the allowed vocabulary can never drift from what Zod
+ * enforces. The disambiguation rules exist because the fields most likely to be
+ * confused are also the ones that matter most for recommendation - conflating
+ * `penetrationType` with oral acts, or `none` with `unknown`, produces features
+ * that are individually plausible and collectively useless.
+ */
 export function buildPrompt(frameCount: number, durationSeconds: number): string {
   const singleFields = TAXONOMY_KEYS.filter((key) => TAXONOMY[key].kind === 'single');
   const multiFields = TAXONOMY_KEYS.filter((key) => TAXONOMY[key].kind === 'multi');
@@ -115,14 +130,16 @@ export function buildPrompt(frameCount: number, durationSeconds: number): string
 
   return [
     `You are tagging an adult vertical short-form video for a content recommendation system.`,
-    `You are shown ${frameCount} frames sampled across its ${durationSeconds.toFixed(1)} seconds, in chronological order.`,
     ``,
-    `Describe the video as a whole, not any single frame. Judge what is true for most of the video.`,
+    `The ${frameCount} images below are frames sampled from ONE SINGLE VIDEO of ${durationSeconds.toFixed(1)} seconds,`,
+    `in chronological order. They are not separate videos and not separate scenes to be`,
+    `described individually. Classify the video AS A WHOLE: judge what is true for most of`,
+    `its duration, and treat a trait that appears in only one frame as incidental.`,
     ``,
     `SINGLE-VALUE fields - return exactly one allowed value as a string:`,
     singleFields.map(describe).join('\n'),
     ``,
-    `MULTI-VALUE fields - return an array of allowed values, or [] if none apply:`,
+    `MULTI-VALUE fields - return an array of allowed values, or [] when none apply:`,
     multiFields.map(describe).join('\n'),
     ``,
     `Also return:`,
@@ -130,16 +147,49 @@ export function buildPrompt(frameCount: number, durationSeconds: number): string
     `- caption: one short sentence describing the video.`,
     `- confidence: object mapping the field names above to your confidence, 0..1.`,
     ``,
-    `Rules:`,
-    `- Use ONLY the allowed values listed. Never invent a value.`,
-    `- Every field above must be present in the response.`,
-    `- Describe apparent presentation as visible in the frames. This is never a claim about anyone's real identity.`,
-    `- Where several people appear, describe the main/dominant performer for adultAgeGroup, hairColor, bodyType, breastSize, buttSize and penisSize.`,
-    `- Use "unknown" when you genuinely cannot tell. Do not guess.`,
-    `- All participants are already known to be consenting adults; adultAgeGroup is an approximate apparent adult age band only.`,
-    `- For multi-value fields return only values you actually observe; [] is valid and expected when nothing applies.`,
-    `- Do not repeat a value within a multi-value field.`,
-    `- Respond with a single JSON object and nothing else.`,
-    `(taxonomy v${TAXONOMY_VERSION})`,
+    `CORE RULES`,
+    `- Use ONLY the allowed values listed above. Never invent a value, never rephrase one.`,
+    `- Every field must be present. Multi-value fields use [] for "nothing applies".`,
+    `- Do not repeat a value inside a multi-value field.`,
+    `- Respond with a single JSON object and nothing else - no prose, no markdown fence.`,
+    ``,
+    `"unknown" VERSUS "none" - THESE ARE DIFFERENT`,
+    `- "none" means you can see that the thing is absent. Example: nobody is having sex,`,
+    `  so sexPosition is "none".`,
+    `- "unknown" means you cannot tell from these frames. Example: the framing never shows`,
+    `  enough to judge body type.`,
+    `- Never substitute a guess for "unknown", and never use "unknown" for something you`,
+    `  can plainly see is absent.`,
+    ``,
+    `WHO YOU ARE DESCRIBING`,
+    `- These appearance fields describe the DOMINANT / MAIN performer only:`,
+    `  adultAgeGroup, hairColor, bodyType, breastSize, buttSize, penisSize.`,
+    `- If no single performer dominates the video, set those fields to "unknown".`,
+    `- performerGender is the EXCEPTION: it describes the composition of everyone present,`,
+    `  not just the main performer. Two women is "female"; a man and a woman is "mixed".`,
+    `- performerCount also covers everyone present.`,
+    ``,
+    `WHAT NOT TO OUTPUT`,
+    `- Never infer or report race or ethnicity. There is no field for it and no field`,
+    `  should be used as a proxy for it.`,
+    `- Everyone depicted is already verified as a consenting adult. adultAgeGroup is only`,
+    `  an approximate apparent adult age band. On any borderline or uncertain case answer`,
+    `  "unknown" rather than guessing a band.`,
+    `- Describe apparent presentation as visible in the frames. Nothing here is a claim`,
+    `  about anyone's real identity.`,
+    ``,
+    `DISAMBIGUATION RULES - follow these exactly`,
+    `- Oral sex is an ACT, not a penetration type. Oral goes in actType as "oral".`,
+    `  penetrationType has no oral value.`,
+    `- Oral only, with no other penetration: sexPosition = "none", penetrationType = "none".`,
+    `- Penetration with a toy: set the matching penetrationType (vaginal / anal), and put`,
+    `  BOTH "toy_use" and "penetrative_sex" in actType.`,
+    `- Several substantial sex positions with no dominant one: sexPosition = "mixed".`,
+    `- Vaginal and anal at different moments of the video: penetrationType = "mixed".`,
+    `- Vaginal and anal at the SAME time: penetrationType = "double_penetration".`,
+    `- Locations change with no dominant one: setting = "other".`,
+    `- explicitness: "nudity" is nudity without an explicit sex act; "explicit" requires an`,
+    `  actual sex act; "suggestive" is sexualised but without explicit nudity or a sex act.`,
+    `(taxonomy v${TAXONOMY_VERSION}, prompt v${PROMPT_VERSION})`,
   ].join('\n');
 }

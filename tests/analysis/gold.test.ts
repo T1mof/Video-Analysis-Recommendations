@@ -68,6 +68,41 @@ describe('summarize', () => {
     expect(summary.videos).toBe(0);
     expect(summary.macroScore).toBe(0);
   });
+
+  it('reports full coverage and identical end-to-end scores when nothing failed', () => {
+    const results = [compareToGold(makeFeatures({ setting: 'outdoor' }), makeGold())];
+    const summary = summarize(results, 1);
+    expect(summary.coverage).toBe(1);
+    expect(summary.endToEndMacro).toBe(summary.macroScore);
+    expect(summary.endToEndSingleMacro).toBe(summary.singleMacro);
+  });
+
+  it('penalises videos the model produced no output for', () => {
+    // Two perfect predictions, but the model was asked about four videos: it
+    // scores 1.0 on what it answered and 0.5 end to end.
+    const results = [compareToGold(makeFeatures(), makeGold()), compareToGold(makeFeatures(), makeGold())];
+    const summary = summarize(results, 4);
+
+    expect(summary.videos).toBe(2);
+    expect(summary.attempted).toBe(4);
+    expect(summary.coverage).toBe(0.5);
+
+    expect(summary.macroScore).toBe(1);
+    expect(summary.endToEndMacro).toBe(0.5);
+    expect(summary.endToEndSingleMacro).toBe(0.5);
+    expect(summary.endToEndMultiMacro).toBe(0.5);
+
+    // Per-field: the valid-output view still says the field was always right.
+    const setting = summary.fieldReports.find((f) => f.field === 'setting')!;
+    expect(setting.strictScore).toBe(1);
+    expect(setting.endToEndScore).toBe(0.5);
+  });
+
+  it('defaults to assuming nothing failed when no attempt count is given', () => {
+    const summary = summarize([compareToGold(makeFeatures(), makeGold())]);
+    expect(summary.attempted).toBe(1);
+    expect(summary.coverage).toBe(1);
+  });
 });
 
 describe('goldDatasetSchema', () => {

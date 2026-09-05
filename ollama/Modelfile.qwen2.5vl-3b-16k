@@ -1,0 +1,30 @@
+# Qwen2.5-VL 3B with a context window large enough for a sampled frame set.
+#
+# Ollama defaults this model to a 4096-token context. That is not enough: a single
+# video's frames dominate the prompt, and at FRAME_MAX_LONG_EDGE=768 each frame
+# costs roughly 1,250 tokens. Six frames plus the taxonomy prompt already measured
+# 7,655 tokens, and the corpus reaches 12 frames on longer videos:
+#
+#   frames   approx. prompt tokens at 768px long edge
+#   ------   ----------------------------------------
+#        6   ~7,700
+#        8   ~10,200
+#       12   ~15,200
+#       16   ~20,200   (MAX_ANALYSIS_FRAMES ceiling)
+#
+# 16384 covers the corpus as configured. Raising it further costs VRAM for KV
+# cache, which is the binding constraint on a 6 GB card - see ARCHITECTURE.md
+# "Local vs rented inference".
+#
+# Build:
+#   ollama create qwen2.5vl-3b-16k -f ollama/Modelfile.qwen2.5vl-3b-16k
+
+FROM qwen2.5vl:3b
+
+PARAMETER num_ctx 16384
+
+# Deterministic output: the same frames must produce the same tags across runs,
+# otherwise the benchmark measures sampling noise rather than model quality.
+PARAMETER temperature 0
+PARAMETER top_p 1
+PARAMETER seed 42

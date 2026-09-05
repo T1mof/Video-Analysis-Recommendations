@@ -88,7 +88,7 @@ describe('jsonSchemaForFeatures', () => {
 describe('buildPrompt', () => {
   it('states the frame count and duration being described', () => {
     const prompt = buildPrompt(8, 32.5);
-    expect(prompt).toContain('8 frames');
+    expect(prompt).toContain('The 8 images below');
     expect(prompt).toContain('32.5 seconds');
   });
 
@@ -104,12 +104,42 @@ describe('buildPrompt', () => {
     const prompt = buildPrompt(8, 32.5);
     expect(prompt).toContain('SINGLE-VALUE fields');
     expect(prompt).toContain('MULTI-VALUE fields');
-    expect(prompt).toContain('[] is valid');
+    expect(prompt).toContain('[] when none apply');
   });
 
   it('tells the model to use unknown rather than guess', () => {
     const prompt = buildPrompt(8, 32.5);
-    expect(prompt).toContain('Do not guess');
-    expect(prompt).toContain('dominant performer');
+    expect(prompt).toContain('Never substitute a guess for "unknown"');
+    expect(prompt).toContain('DOMINANT / MAIN performer');
+  });
+
+  it('states that the frames are one video, not many', () => {
+    const prompt = buildPrompt(8, 32.5);
+    expect(prompt).toContain('ONE SINGLE VIDEO');
+    expect(prompt).toContain('AS A WHOLE');
+  });
+
+  it('carries the disambiguation rules that the taxonomy alone cannot express', () => {
+    const prompt = buildPrompt(8, 32.5);
+    // These are the confusions that produce individually plausible, collectively
+    // useless features.
+    expect(prompt).toContain('penetrationType has no oral value');
+    expect(prompt).toContain('toy_use');
+    expect(prompt).toContain('double_penetration');
+    expect(prompt).toContain('sexPosition = "mixed"');
+    expect(prompt).toContain('setting = "other"');
+  });
+
+  it('forbids race and ethnicity inference', () => {
+    expect(buildPrompt(8, 32.5)).toContain('Never infer or report race or ethnicity');
+  });
+
+  it('distinguishes none from unknown explicitly', () => {
+    const prompt = buildPrompt(8, 32.5);
+    expect(prompt).toContain('"unknown" VERSUS "none"');
+  });
+
+  it('says performerGender covers everyone, not just the main performer', () => {
+    expect(buildPrompt(8, 32.5)).toContain('performerGender is the EXCEPTION');
   });
 });

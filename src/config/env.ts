@@ -132,11 +132,25 @@ const schema = z.object({
   TRENDING_FEED_REFRESH_SECONDS: int(300),
 
   // workers
-  ANALYSIS_CONCURRENCY: int(2),
+  /**
+   * Bounded by GPU memory, not CPU. One quantised VLM inference at a time is all a
+   * 6 GB card fits; raising this on such a card produces out-of-memory failures
+   * partway through a corpus run. A 24 GB A10/L4 comfortably takes 2-4.
+   */
+  ANALYSIS_CONCURRENCY: int(1),
   EVENT_CONCURRENCY: int(4),
   FEED_CONCURRENCY: int(2),
 
   // cost model inputs
+  /**
+   * Actual rate paid for the benchmark GPU, in its billing currency. Kept in RUB
+   * because that is what the invoice says; converting at an invented rate would
+   * turn a measured number into a guess.
+   */
+  COST_GPU_HOURLY_RUB: num(41.06),
+  /** Set only when a real, dated rate is known. 0 disables USD output entirely. */
+  COST_RUB_PER_USD: num(0),
+  COST_RUB_RATE_SOURCE: z.string().default(''),
   COST_GPU_HOURLY_USD: num(0.6),
   COST_HOSTED_INPUT_USD_PER_MTOK: num(0.2),
   COST_HOSTED_OUTPUT_USD_PER_MTOK: num(0.6),

@@ -14,11 +14,31 @@ way to get it except by a person looking at the videos.
 Without this file the benchmark would rank a fast, cheap, systematically wrong
 model first.
 
+## Two sets: DEV-15 and HOLDOUT-15
+
+`labels.json` currently holds the **DEV-15** set — 15 of the 30 corpus videos.
+
+Those 15 are **burned as an independent measure.** They have been used to compare
+three vision models, to analyse per-field errors and to reason about the prompt.
+Any score quoted against them is a fitted number, and it must be labelled DEV.
+
+The remaining 15 videos are reserved as **HOLDOUT-15**, to be labelled in M8.4.
+The rules are absolute, because a held-out set is worth nothing the moment it leaks:
+
+- label them by hand **without** looking at any model predictions;
+- never use them for prompt tuning;
+- never use them for choosing a sampling strategy;
+- never use them for model selection;
+- open them **exactly once**, after the final configuration is frozen (M8.6).
+
+After that single run, a GOLD-30 aggregate may also be reported, but HOLDOUT-15 is
+the headline independent number. See [docs/ROADMAP.md](../../docs/ROADMAP.md).
+
 ## Scope and honesty about it
 
-Target size is **10–15 videos**. That is a smoke test, not a statistically robust
-evaluation, and it is reported as such in ARCHITECTURE.md. It is sharp enough to
-catch the failure that actually matters here: a model that misreads the taxonomy
+Target size is **10–15 videos** per set. That is a smoke test, not a statistically
+robust evaluation, and it is reported as such in ARCHITECTURE.md. It is sharp enough
+to catch the failure that actually matters here: a model that misreads the taxonomy
 in a consistent direction (e.g. never distinguishes `nudity` from `explicit`, or
 collapses every `setting` to `bedroom`).
 

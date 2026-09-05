@@ -13,6 +13,7 @@
     "start:worker": "node dist/workers/index.js",
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
+    "check:env": "tsx scripts/check-env.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",

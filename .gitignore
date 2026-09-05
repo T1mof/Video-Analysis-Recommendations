@@ -18,11 +18,18 @@ data/tmp/
 data/frames/
 # Debug artefacts from `npm run preprocess`: contact sheets and --keep-frames output.
 data/debug/
-storage/
+# Root-anchored: an unanchored "storage/" also matches src/storage/, which silently
+# kept the S3 client out of the repository until a clean-clone check caught it.
+/storage/
 
 # Gold labels reference local video ids and describe 18+ content; the process for
 # regenerating them is documented in data/gold/README.md, which IS tracked.
 data/gold/labels.json
+
+# Raw per-video model predictions kept for model-to-model comparison. Same reason
+# as gold: they describe 18+ content and reference local ids. The aggregated
+# reports in docs/BENCHMARK-*.md are the committed artefacts.
+data/benchmarks/
 
 # Playwright browser session state (contains auth cookies)
 .auth/
