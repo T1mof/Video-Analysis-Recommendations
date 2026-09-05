@@ -257,6 +257,41 @@ rather than anything that recomputes recommendations per request.
 
 ---
 
+## Recommendations
+
+Five candidate sources → union → dedupe → filter → weighted ranking → diversity
+reranking → an ordered list, with a full score breakdown per item.
+
+```bash
+npm run demo:recommendations
+```
+
+Alice and Bob reacted to the same corpus in opposite ways, so their orderings
+diverge; Carol is cold-start and is served global signals only:
+
+```
+demo_alice   cold start: no    candidates: similar 18  tag 14  trending 3 … → 18 unique
+  1  video_15  demo_creator_05  similar,tag,trending,fresh   base 0.554  final 0.554
+        + popularity +0.250, freshness +0.183, affinity +0.129
+        - fatigue -0.146
+
+demo_carol   cold start: YES   candidates: similar 0  tag 0  trending 6  fresh 27 …
+```
+
+`video_25` is Bob's top recommendation and Alice's tenth — she is measurably
+negative on it (`affinity −0.201`). That divergence is the whole point.
+
+```
+score = 1.0×affinity + 0.15×quality + 0.2×freshness + 0.25×popularity
+      − 0.35×fatigue + 0.1×exploration + 0.2×creatorAffinity
+```
+
+Weights are heuristic priors — there is no interaction dataset to learn them from
+yet. Full reasoning, feature ranges and the diversity rules are in
+[ARCHITECTURE.md](ARCHITECTURE.md#candidate-generation-ranking-and-diversity).
+
+---
+
 ## Background workers
 
 ```bash

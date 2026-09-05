@@ -1,9 +1,9 @@
-# Session handoff — M5 complete, M6 next
+# Session handoff — M6 complete, M7 next
 
 Durable checkpoint. Self-contained: everything needed to resume is here or in the
 files it names.
 
-**Date:** 2026-09-05 · **M4 committed as `6d48ed2`** · **M5 implemented, not yet committed.**
+**Date:** 2026-09-06 · **M4 = `6d48ed2` · M5 = `b889295`** · M6 implemented, not yet committed.
 
 ---
 
@@ -148,29 +148,87 @@ an SSH tunnel; never expose the endpoint.
 
 ---
 
-## Quality work: M8.4 / M8.5 / M8.6 — planned, does NOT block M5–M8
+## M6 — candidate generation, ranking, diversity: DONE
 
-The full strategy lives in **[ROADMAP.md](ROADMAP.md)** — experiment list, protocol,
-targets and stop rules. It survives compaction there; this is only the summary.
+Five sources → union → dedupe → filter → rank → diversify → ordered list.
+Modules: `src/reco/{candidates,ranking,diversity,recommender,diversityTags}.ts`.
 
-- **M8.4** — the current 15 labelled videos are now **DEV-15** (burned: they have
-  scored three models). The remaining 15 become **HOLDOUT-15**, labelled by hand,
-  never used for prompt tuning, sampling choice or model selection, opened once
-  after the final configuration is frozen.
-- **M8.5** — controlled ablation, one factor per experiment: frame-coverage sweep,
-  smarter sampling, native video vs frames, prompt v3, **two-stage perception →
-  taxonomy mapping**, temporal chunk aggregation, focused field groups, a few
-  consistency invariants, and a larger Qwen only after the cheap levers.
-- **M8.6** — freeze everything, run HOLDOUT-15 **once**, report DEV-15 /
+```
+score = 1.0×affinity + 0.15×quality + 0.2×freshness + 0.25×popularity
+      − 0.35×fatigue + 0.1×exploration + 0.2×creatorAffinity
+rerank = baseScore − 0.3 × max(0, maxCosineToSelected)
+```
+
+**Decisions worth not re-litigating:**
+
+- **No new env keys.** Every K, weight and cap already existed from M1.
+- **Quality = `aestheticScore`, never `productionQuality`.** Professional vs amateur
+  is a kind of content and a plausible user preference, not a measure of a good
+  recommendation. When aestheticScore is missing the feature reports
+  `qualityAvailable: false` and contributes zero rather than inventing a proxy.
+- **Fatigue ≠ diversity.** Fatigue looks backwards at history (recent *distinct*
+  videos), diversity sideways within the list. Fatigue is scaled by how full the
+  history window is — a frequency over three videos is noise and would otherwise
+  outweigh every positive term.
+- **Null creator is exempt from the creator cap, not pooled** — pooling would let
+  anonymous videos block each other.
+- **Diversity tags are one centralised policy**, excluding near-constant fields
+  (`performerGender`, `explicitness`, `mediaType`); capping on those would block the
+  whole feed. A compile-time assertion fails if a taxonomy change leaves a field
+  unclassified.
+- **Two-pass fallback** with `diversityRelaxed` in diagnostics: on 30 videos the
+  caps can make a full list impossible, and a limit near the corpus size forces
+  relaxation by construction.
+- **Determinism everywhere**: hash-based exploration bucketed by UTC day, ties
+  broken on videoId.
+- **Popularity is normalised over the whole trending window, not the caller pool**,
+  so a video scores the same for every user at every limit. Negative engagement
+  clamps to 0 - min-max over signed values would promote the *least* skipped video
+  to 1.0 in a window where everything was skipped.
+- **Integration tests run one file at a time** (`fileParallelism: false`): they share
+  one Postgres, and trending popularity is a global aggregate, so a concurrent file
+  inserting events changed what another was measuring.
+
+Demo: `npm run demo:recommendations`. Alice and Bob share 5 of 10 videos in
+different orders; `video_25` is Bob's #1 and Alice's #10 (affinity −0.201). Carol is
+cold-start: similar 0, tag 0, served from trending/fresh/explore. ~10 ms per user.
+
+## Quality work: M8.4 – M8.7 — planned, does NOT block M7–M8
+
+The full strategy lives in **[ROADMAP.md](ROADMAP.md)** — 12 numbered M8.5 steps,
+protocol, targets and stop rules. It survives compaction there; this is the summary.
+
+- **M8.4** — the current 15 labelled videos are **DEV-15**, burned as an independent
+  measure: they have scored three models and informed prompt discussion. The
+  remaining 15 become **HOLDOUT-15** — hand-labelled without seeing predictions,
+  never used for prompt tuning, sampling choice, model selection or picking
+  consistency rules, opened exactly once after the configuration is frozen.
+- **M8.5** — **pipeline first, models last.** The model stays fixed at Qwen3-VL-8B
+  while the pipeline is understood: (1) error decomposition into perception /
+  temporal coverage / taxonomy-mapping / ambiguity / consistency classes, (2) prompt
+  v3 on general semantics, (3) **two-stage perception → taxonomy mapping**, (4)
+  frame-coverage ablation, (5) smarter sampling, (6) native video, (7) temporal
+  chunk aggregation, (8) a small consistency layer. Only then models: (9) a
+  new-generation Qwen (candidate Qwen3.5-9B), (10) a cross-family open-weight
+  competitor chosen at the time, (11) an optional hosted model subject to policy and
+  retention, (12) a large model only if capacity is proven to be the limit.
+  Starting with a model sweep would blame model capacity for a prompt bug.
+- **M8.6** — freeze everything, open HOLDOUT-15 **once**, report DEV-15 /
   HOLDOUT-15 / GOLD-30, and record overfitting honestly if HOLDOUT is worse.
+- **M8.7 — optional, and not part of the VLM work.** Learned-ranker readiness:
+  synthetic users with *hidden* preferences (never given to the ranker) generate
+  interactions, then LR/LightGBM/LambdaMART is compared against the M6 heuristic on
+  NDCG@K / Recall@K. It proves the feature and training pipeline can support a
+  learned ranker — **never** quote it as production recommendation quality.
 
 Targets are orientation, not acceptance criteria: `~0.55` now, `>=0.60` good,
-`0.62-0.65` very strong, `>=0.70` stretch. Stop rule: a change worth ≤0.01–0.02
-macro that does not improve recommendation-critical fields is not worth complicating
-the pipeline for.
+`0.62-0.65` very strong, `>=0.70` stretch. Stop rules: no model zoo; a change worth
+≤0.01–0.02 macro that does not improve recommendation-critical fields is not worth
+complicating the pipeline for.
 
-**Model search is closed.** Do not resume it and do not delay M5–M8 chasing a higher
-macro. `VLM tag macro != recommendation quality` — the feed is judged on the feed.
+**Model search is closed until M8.5.** Do not resume it and do not delay M6–M8
+chasing a higher macro. `VLM tag macro != recommendation quality` — the feed is
+judged on the feed.
 
 Two known findings deliberately left alone, both recorded:
 
@@ -193,8 +251,8 @@ Two known findings deliberately left alone, both recorded:
 
 ### Checks
 
-`typecheck 0` · `lint 0` · `tests 224 passed, 5 skipped` (with `TEST_INTEGRATION=1`;
-without it the 3 integration files are skipped) · `check:env` in sync at 78 keys
+`typecheck 0` · `lint 0` · `tests 299 passed, 5 skipped` (with `TEST_INTEGRATION=1`;
+without it the 4 integration files are skipped) · `check:env` in sync at 78 keys
 
 ---
 
@@ -212,26 +270,25 @@ without the owner's confirmation.
 | M0–M3 | infra, taxonomy v2, ingestion, DEV-15, preprocessing | **DONE** |
 | M4 | VLM analysis + model selection | **DONE** |
 | M5 | user interactions + user profile | **DONE** |
-| **M6** | **candidate generation + ranking + diversity** | **NEXT** |
-| M7 | feed serving + Redis precomputation | planned |
+| M6 | candidate generation + ranking + diversity | **DONE** |
+| **M7** | **feed serving + Redis precomputation** | **NEXT** |
 | M8 | minimal demo + architecture + documentation | planned |
-| M8.4–M8.6 | GOLD-30/HOLDOUT prep, quality optimization, held-out eval | after MVP |
+| M8.4–M8.6 | HOLDOUT-15 prep, VLM quality optimization, held-out eval | after MVP |
+| M8.7 | learned-ranker readiness | optional |
 | M9 | scraper | optional bonus |
 | M10 | final polish, clean-clone check, demo rehearsal | planned |
 
-**M6 — candidate generation, ranking and diversity.** It consumes what M5 built:
+**M7 — feed serving.** It consumes what M6 built:
 
-| M5 output | M6 use |
+| M6 output | M7 use |
 |---|---|
-| `user_profiles.embedding` | pgvector similarity candidates |
-| `user_profiles.tag_affinity` | tag candidates over the jsonb features |
-| `user_creator_affinity` | ranking feature — never a hard filter |
-| `is_cold_start` | which sources a user gets when there is no taste yet |
-| negative dimensions | active dislikes, not absence of evidence |
+| `recommendCandidates(userId, limit)` | what a background job calls to fill a feed |
+| ordered list + diagnostics | the payload cached in Redis |
+| `candidateShortage` | the signal that a repeat/backfill policy is needed |
 
-Shape already decided: five candidate sources → union → dedup → filter → rank →
-diversity, with the numeric ranking features (aesthetic, freshness, popularity,
-creator affinity, exploration) kept outside the taxonomy vector. Then M7
-(Redis-first `GET /feed`), M8 (UI, docs, demo). Scraper is the bonus at the end.
-Full milestone table, quality-work strategy and cutting rules:
-[ROADMAP.md](ROADMAP.md).
+The shape is already decided and is the reason the 3k RPS design works:
+`GET /feed` must be a Redis read, with **no** code path from an HTTP request to
+pgvector or to the ranker — not as a fallback, not behind a flag. Feeds are filled
+by prewarm, by an event-driven rebuild, and a cache miss is served from the
+precomputed global trending feed. Then M8 (UI, docs, demo). Scraper is the bonus at
+the end. Full milestone table and quality-work strategy: [ROADMAP.md](ROADMAP.md).

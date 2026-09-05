@@ -746,6 +746,206 @@ periodic full rebuilds to correct drift and to re-encode after a taxonomy change
 Nothing in the formula above changes — which is the point of keeping
 `computeProfile()` a pure function of (events, vectors, clock).
 
+## Candidate generation, ranking and diversity
+
+The recommendation core. Implemented in [src/reco/](src/reco/) as four modules —
+`candidates.ts`, `ranking.ts`, `diversity.ts`, `recommender.ts` — because the three
+stages fail differently and must be testable apart.
+
+```
+user profile
+   → 5 candidate sources → union → dedupe → filter
+   → feature computation → weighted ranking
+   → diversity reranking
+   → ordered list
+```
+
+It answers *which videos, in what order*. It does not serve them: turning this into
+a feed is M7, and the 3k RPS design depends on no HTTP request ever reaching this
+code.
+
+### Five sources, independently capped
+
+| Source | Cap | How it retrieves |
+|---|---:|---|
+| `similar` | `CAND_SIMILAR_K` 200 | pgvector cosine between the profile vector and video vectors |
+| `tag` | `CAND_TAG_K` 100 | jsonb lookup on the user's strongest preferred taxonomy values, over the GIN index |
+| `trending` | `CAND_TRENDING_K` 100 | signed engagement from `events` in a `TRENDING_WINDOW_HOURS` (72h) window |
+| `fresh` | `CAND_FRESH_K` 50 | newest analysed videos |
+| `explore` | `CAND_EXPLORE_K` 50 | deterministic hash of `userId + videoId + UTC day` |
+
+No source filters, scores or orders — each returns a plain set of ids. Filtering and
+ranking are common stages that run once over the merged set, so an exclusion rule is
+written once instead of five times, and one source returning nothing cannot starve
+the feed. A video found by several sources appears **once**, carrying every source
+that produced it (`sources: ["similar","tag","fresh"]`) — which is what makes the
+demo able to say where a recommendation came from.
+
+`similar` and `tag` overlap without being redundant: the vector generalises to tag
+combinations the user has never seen, the tag lookup is exact, explainable, and
+still works if the vector index is unavailable.
+
+**Eligibility** is one rule: `status = analyzed`, a stored taxonomy vector of the
+current version and dimension, all values finite. That covers ingested, analysing
+and failed in a single condition, which is why no separate `unavailable` status
+exists. Mock features are never substituted for missing ones — that would recommend
+a video on invented content.
+
+**Seen** means *distinct videos with any event*: an impression, a view and a like of
+one video are one seen item, not three. When fewer unseen candidates exist than were
+requested, the result reports `candidateShortage` rather than quietly padding the
+list with already-seen videos. Whether to re-show them is a product policy question,
+and it belongs to M7.
+
+### Ranking
+
+```
+score = W_AFFINITY(1.0)          × affinity
+      + W_QUALITY(0.15)          × quality
+      + W_FRESHNESS(0.2)         × freshness
+      + W_POPULARITY(0.25)       × popularity
+      − W_FATIGUE(0.35)          × fatigue
+      + W_EXPLORATION(0.1)       × exploration
+      + W_CREATOR_AFFINITY(0.2)  × creatorAffinity
+```
+
+| Feature | Range | Meaning |
+|---|---|---|
+| `contentSimilarity` | [−1, 1] | cosine(profile, video). Negative = matches active dislikes |
+| `tagAffinity` | [−1, 1] | mean signed preference over the video's meaningful tags |
+| `affinity` | [−1, 1] | `(contentSimilarity + tagAffinity) / 2` |
+| `creatorAffinity` | signed | from `user_creator_affinity`; 0 when the creator is unknown |
+| `popularity` | [0, 1] | engagement scaled against the strongest in the trending window |
+| `freshness` | [0, 1] | `0.5 ^ (ageHours / 168)` |
+| `fatigue` | [0, 1] | repetitiveness vs recent history; **subtracted** |
+| `exploration` | [0, 1] | deterministic hash |
+| `quality` | [0, 1] | `aestheticScore`; 0 with `qualityAvailable: false` when absent |
+
+> **Initial ranking weights are heuristic priors because no production interaction
+> dataset exists yet.** They encode an opinion about what should matter, and they
+> are honest about being an opinion. A learned ranker is planned separately as
+> M8.7; this stage's interface is what makes that a drop-in replacement.
+
+Two similarity signals are kept and averaged rather than collapsed: cosine is a
+geometric summary of all 110 dimensions, tag affinity is a per-tag match that can be
+read aloud. Both are stored in the breakdown, so a future learned ranker can weight
+them separately instead of inheriting an arbitrary 50/50.
+
+**Popularity is normalised over the whole trending window, not over the caller's
+candidate pool.** `loadEngagement` aggregates every event in the window across the
+corpus with no user or candidate filter, so a video scores the same for every user
+at every requested limit — otherwise "popularity" would mean something different per
+request and could not be reasoned about. Negative engagement clamps to zero rather
+than being rescaled: min-max over signed values has a nasty failure mode where, in a
+window that is net-negative, the *least* skipped video maps to 1.0 and is presented
+as the most popular thing in the catalogue.
+
+**Quality is `aestheticScore`, not `productionQuality`.** Professional vs amateur is
+a *kind* of content and plausibly a user preference; treating it as quality would
+silently push every user toward studio material. `aestheticScore` is the model's own
+0–1 judgement of visual appeal — still only a weak prior, since it is a self-report
+never validated against the gold set, which is why it carries the smallest weight.
+When it is missing the feature reports itself unavailable and contributes zero,
+rather than inventing a proxy.
+
+### Fatigue is not diversity
+
+They are easy to conflate and they solve different problems.
+
+- **Fatigue** looks *backwards* at history: how much of what this user has recently
+  seen already looks like this candidate. Measured over recent **distinct videos**,
+  not events, so three interactions with one video are one exposure.
+- **Diversity** looks *sideways* within the list being built.
+
+A feed can be internally diverse and still be the fifth day running of the same
+creator; only fatigue catches that. Fatigue is scaled by how full the history window
+is — a frequency measured over three videos is noise, and at full strength it would
+outweigh every positive term.
+
+### Cold start
+
+`isColdStart` comes from M5 (fewer than 5 effective signals). For such a user the
+`similar` and `tag` sources are skipped entirely, and `affinity` and
+`creatorAffinity` are zeroed in ranking. A sparse profile is not a taste, and
+pretending otherwise produces confident recommendations built on two clicks.
+
+What remains is global: popularity, freshness, quality and exploration. What a
+cold-start user is actually *shown* is M7's problem.
+
+### Diversity reranking
+
+A separate pass over the ranked list, never folded into the score.
+
+```
+rerankScore = baseScore − DIVERSITY_LAMBDA(0.3) × max(0, maxCosineToSelected)
+```
+
+Only positive similarity is penalised: a candidate that is the opposite of what is
+already selected is the diverse choice, and rewarding it would turn diversity into a
+second hidden ranking signal.
+
+Two independent hard caps, because they fail differently — ten creators shooting
+near-identical content, or one creator across genuinely varied content:
+
+- `DIVERSITY_MAX_SAME_CREATOR` = 2. A **null creator is exempt, not pooled**:
+  treating "unknown" as one shared creator would let anonymous videos block each
+  other, the opposite of the rule's purpose.
+- `DIVERSITY_MAX_SAME_TAG_IN_TOP10` = 3, applied in the top 10 where monotony is
+  actually visible.
+
+**Meaningful diversity tags** are a single centralised policy
+(`diversityTags.ts`), shared by diversity and fatigue so "similar content" cannot
+mean two different things in two files. It counts `actType`, `fetishTags`,
+`setting`, `cameraStyle`, `hairColor`, `sexPosition`, `penetrationType`, and
+excludes `unknown`, `none` and the near-constant fields — on this corpus almost
+every video is `performerGender:female` and `explicitness:explicit`, so capping on
+those would block the entire feed while telling the user nothing. It works through
+taxonomy semantics, never through vector offsets, and a compile-time assertion fails
+if a taxonomy change leaves a field unclassified.
+
+**Small-corpus fallback.** Pass 1 honours every constraint; pass 2 runs only if the
+list is still short and candidates remain, filling the rest by score with the caps
+lifted and setting `diversityRelaxed` in diagnostics. On 30 videos the caps can
+genuinely make a full list impossible, and returning four videos when ten exist is a
+worse answer than a slightly repetitive ten. Note that requesting a limit close to
+the corpus size forces relaxation by construction — the caps cannot hold when the
+whole catalogue must be returned.
+
+### Determinism
+
+Ties break on `videoId`, exploration is a hash rather than `Math.random()`, and the
+exploration bucket is the UTC day. The same user, database state and day therefore
+produce the same list — which is what makes the output testable, debuggable and
+explainable.
+
+### Explainability
+
+Every ranked candidate carries its sources, all nine feature values, each weighted
+term, the base score, the diversity penalty and the final score. That is what
+answers "why is this above that?" — for debugging now and for the demo panel later.
+It is diagnostic output, not something a production client is handed by default.
+
+### At scale
+
+Measured on the current corpus: 30 videos, ~10 ms per user end to end (69 ms on the
+first call, which includes connection warm-up). Nothing here needs optimising yet.
+
+The shape that survives to a million videos:
+
+```
+profile
+  → ANN (pgvector HNSW) + precomputed trending/fresh pools + creator/tag indices
+  → a few hundred candidates
+  → feature enrichment → rank → diversify
+```
+
+The similarity query is already expressed in pgvector rather than in JavaScript
+precisely so the HNSW index takes over transparently: the semantics do not change,
+so the recommendation logic does not either. Trending currently aggregates raw
+events on read; at scale that becomes a streaming counter with periodic snapshots
+into a precomputed pool. Neither is implemented now — a Kafka topic with no consumer
+is architecture theatre.
+
 ## Serving the feed
 
 ### Hot path

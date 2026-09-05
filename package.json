@@ -28,6 +28,7 @@
     "analyze": "tsx scripts/analyze.ts",
     "simulate": "tsx scripts/simulate-events.ts",
     "demo:profile": "tsx scripts/simulate-events.ts",
+    "demo:recommendations": "tsx scripts/demo-recommendations.ts",
     "rebuild-feeds": "tsx scripts/rebuild-feeds.ts",
     "cost-model": "tsx scripts/cost-model.ts",
     "bench-vlm": "tsx scripts/bench-vlm.ts",
