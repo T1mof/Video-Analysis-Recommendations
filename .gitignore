@@ -16,6 +16,8 @@ data/seed/*
 !data/seed/manifest.json
 data/tmp/
 data/frames/
+# Debug artefacts from `npm run preprocess`: contact sheets and --keep-frames output.
+data/debug/
 storage/
 
 # Gold labels reference local video ids and describe 18+ content; the process for

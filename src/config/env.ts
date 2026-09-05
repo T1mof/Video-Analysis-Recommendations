@@ -60,22 +60,37 @@ const schema = z.object({
   VISION_TIMEOUT_MS: int(180_000),
   VISION_MAX_RETRIES: int(1),
 
-  // frame sampling - the primary cost lever
+  // frame sampling - the primary cost lever.
+  // Frames x pixels-per-frame is what a VLM bills for, so these bounds set the
+  // per-video price. See src/analysis/sampling.ts.
   FRAMES_TIER_SHORT: int(6),
   FRAMES_TIER_MEDIUM: int(8),
   FRAMES_TIER_LONG: int(12),
-  FRAMES_TIER_XLONG: int(16),
-  FRAMES_TIER_XXLONG: int(24),
-  FRAMES_MAX_BUDGET: int(24),
-  FRAMES_BOUND_SHORT: num(20),
-  FRAMES_BOUND_MEDIUM: num(45),
-  FRAMES_BOUND_LONG: num(90),
-  FRAMES_BOUND_XLONG: num(180),
-  SCENE_THRESHOLD: num(0.3),
-  FRAME_WIDTH: int(512),
+  FRAMES_TIER_MAX: int(16),
+  FRAMES_BOUND_SHORT: num(30),
+  FRAMES_BOUND_MEDIUM: num(60),
+  FRAMES_BOUND_LONG: num(120),
+  /** Hard ceiling. No video may ever cost more than this many frames. */
+  MAX_ANALYSIS_FRAMES: int(16),
+  /** Floor after de-duplication, when enough distinct frames exist to reach it. */
+  MIN_ANALYSIS_FRAMES: int(3),
+  /** Longest edge sent to the model. Never upscales a smaller source. */
+  FRAME_MAX_LONG_EDGE: int(768),
   FRAME_JPEG_QUALITY: int(4),
   DEDUP_HAMMING_THRESHOLD: int(6),
+  /** Fraction trimmed from each end, to dodge intros, fades and end cards. */
   HEAD_TAIL_TRIM_PCT: num(0.05),
+  /**
+   * Opt-in scene-aware sampling. Off by default because detecting cuts requires
+   * decoding every frame of the video, which is exactly the cost the sampling
+   * design exists to avoid. See src/analysis/sceneDetect.ts.
+   */
+  SAMPLING_SCENE_AWARE: bool(false),
+  SCENE_THRESHOLD: num(0.3),
+  /** How far a uniform timestamp may move to land just after a nearby cut. */
+  SCENE_SNAP_WINDOW_SECONDS: num(1.5),
+  /** Debug artefacts (contact sheets, kept frames). Never part of the pipeline. */
+  PREPROCESS_DEBUG_DIR: z.string().default('data/debug'),
 
   // candidate generation
   CAND_SIMILAR_K: int(200),
@@ -143,18 +158,3 @@ function load(): Env {
 }
 
 export const env: Env = load();
-
-/** Frame budget for a video of the given duration, honouring the hard cap. */
-export function frameBudgetFor(durationSeconds: number): number {
-  const tier =
-    durationSeconds <= env.FRAMES_BOUND_SHORT
-      ? env.FRAMES_TIER_SHORT
-      : durationSeconds <= env.FRAMES_BOUND_MEDIUM
-        ? env.FRAMES_TIER_MEDIUM
-        : durationSeconds <= env.FRAMES_BOUND_LONG
-          ? env.FRAMES_TIER_LONG
-          : durationSeconds <= env.FRAMES_BOUND_XLONG
-            ? env.FRAMES_TIER_XLONG
-            : env.FRAMES_TIER_XXLONG;
-  return Math.min(tier, env.FRAMES_MAX_BUDGET);
-}
