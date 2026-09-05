@@ -602,6 +602,150 @@ What matters more than the figure is the shape:
 - **Storage is small but recurring**, so on a long horizon it overtakes the one-off
   inference cost.
 
+## User interactions and the preference profile
+
+The bridge between "we have described the videos" and "we can rank them for this
+person". Implemented in [src/reco/](src/reco/).
+
+### From behaviour to a number
+
+```
+user interaction -> signed weight -> time decay -> x video vector -> profile
+```
+
+Event weights live in exactly one module, `src/reco/signals.ts`:
+
+| Event | Weight | Meaning |
+|---|---:|---|
+| `impression` | 0.00 | Shown, not chosen. Exposure, not interest. |
+| `view` | +0.25 | Started or continued watching. |
+| `watch` | +0.25 | **Legacy, not accepted by the API** — see below. |
+| `complete` | +0.60 | Watched to the end. |
+| `like` | +1.00 | Explicit approval. |
+| `skip` | −0.50 | Dismissed quickly. |
+| `dislike` | −1.00 | Explicit rejection. |
+
+They are constants rather than environment variables deliberately: six knobs
+nobody will turn during a one-week MVP add deployment surface without adding
+capability. The two values that genuinely are policy — the decay half-life and the
+cold-start threshold — already exist in config as `PROFILE_HALFLIFE_DAYS` (7) and
+`COLD_START_MIN_INTERACTIONS` (5).
+
+**One canonical signal per meaning.** The original schema shipped both `view` and
+`watch`, which mean the same thing. Two accepted event types with the same meaning
+are additive by accident: a client emitting `view` on playback start and `watch` as
+a progress ping would contribute +0.50 for a single playback — double what the
+table promises, and nearly as much as finishing the video. `watch` therefore has no
+producer and is rejected by the intake schema; it keeps its weight only so any row
+written against the original enum still scores. Watch *duration* is carried by
+`positionPct` on the event, not by a separate event type.
+
+### The formula
+
+```
+signal_i = eventWeight(type_i) x decay(age_i)
+
+decay(ageDays) = 0.5 ^ (ageDays / halfLifeDays)
+
+              sum( signal_i x v_i )
+profile P =  ------------------------
+              max( sum |signal_i|, eps )
+```
+
+where `v_i` is the video's 110-dimension taxonomy vector.
+
+**Why exponential decay.** Linear decay has a cliff — an event one day outside the
+window is worth nothing while one just inside it is worth something — and taste
+fades rather than expiring. Exponential decay is also self-limiting: old events
+never quite reach zero but stop mattering, so the profile keeps a faint long-term
+memory while tracking recent behaviour. With a 7-day half-life: today 1.0, a week
+ago 0.5, two weeks ago 0.25.
+
+**Why divide by the sum of absolute signals.** Without it the vector's magnitude
+grows with activity, so a heavy user and a light user with identical taste would
+produce different-length vectors and any threshold tuned on one would be wrong for
+the other. Dividing by total signal mass makes the profile a weighted *average* of
+the content the user reacted to. Repeating the same interaction then reinforces a
+preference instead of inflating it.
+
+Absolute value, not the signed sum: a user with one like and one skip has a signal
+mass of 1.5, not 0.5. A signed denominator could approach zero for a balanced user
+and blow the vector up.
+
+**Why negative dimensions survive.** Values are left negative rather than clamped
+at zero. A profile that can only accumulate positives drifts toward whatever it has
+already been shown and cannot recover from a bad recommendation streak, because
+nothing pushes a preference back down. M6 reads negative dimensions as active
+dislikes rather than as absence of evidence.
+
+The whole thing is deterministic and interpretable — no model, no training.
+Rebuilding from the same history always produces the same vector, which is what
+makes the "why was this recommended" panel trustworthy rather than decorative.
+
+### Videos without features
+
+An interaction with a video that has no analysed taxonomy vector is stored as
+behaviour but contributes nothing to the profile, and is counted separately in
+`skipped_no_features`. Substituting mock features there would teach the profile
+preferences the user never expressed — the same class of mistake as the benchmark
+contamination found in M4.
+
+### Cold start
+
+Cold start is decided by `effective_signal_count`: events with a non-zero weight
+*and* an analysed video behind them. Below 5, the user is cold. Scrolling past
+fifty videos generates fifty impressions and leaves the user exactly as cold as
+they started, which is correct — being shown things is not the same as liking them.
+
+M5 only sets the flag. What a cold user actually sees is M6/M7.
+
+### Creator affinity, kept outside the vector
+
+```
+creatorAffinity(c) = sum( signal_i for creator c ) / max( sum |signal_i|, eps )
+```
+
+Same denominator as the profile, so the two are on the same scale and the value
+can be negative — a creator the user reliably skips scores below zero.
+
+Creators are deliberately **not** dimensions of the taxonomy vector. "Which
+creators does this user like?" is an identity question, not a content one; putting
+creators in the vector would force a schema migration and a full re-embed whenever
+the creator set changed, and would let creator identity leak into content
+similarity. It is stored in a normal table rather than a JSON blob because M6 needs
+"top creators for this user" as an indexed query. It is a ranking feature there,
+never a hard filter — a user who likes a creator should still see other creators.
+
+### Storage
+
+`user_profiles` holds the materialised vector plus the counters needed to diagnose
+it (interaction count, effective signal count, positive and negative signal mass,
+skipped-no-features, cold-start flag). M6 must be able to rank from one read rather
+than replaying history per request.
+
+Idempotency is enforced by a unique index on `events.event_id`, a client-supplied
+key, rather than by a read-then-write check — two concurrent retries would both
+pass a check and both insert. Mobile clients retry on flaky networks, and without
+this a single like becomes two.
+
+### MVP rebuild, and how it evolves
+
+The MVP recomputes a user's profile from their full history on every write. For one
+user that is a few milliseconds, it is exactly reproducible, and there is no
+incremental state to drift out of sync. It does not scale to millions of users.
+
+The production path keeps the formula and changes the plumbing:
+
+```
+interaction API -> Kafka / Redpanda -> profile updater (incremental)
+                                    -> profile store: Redis + durable Postgres
+```
+
+The updater applies each event to a running sum rather than replaying history, with
+periodic full rebuilds to correct drift and to re-encode after a taxonomy change.
+Nothing in the formula above changes — which is the point of keeping
+`computeProfile()` a pure function of (events, vectors, clock).
+
 ## Serving the feed
 
 ### Hot path

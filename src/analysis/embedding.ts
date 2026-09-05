@@ -135,15 +135,49 @@ export function explainSimilarity(
   return terms.slice(0, topN);
 }
 
-/** Top tag names in a profile vector - shown as "your taste" in the demo. */
-export function topDimensions(vec: readonly number[], topN = 8): Contribution[] {
+/**
+ * Top tag names in a profile vector - shown as "your taste" in the demo.
+ *
+ * `direction: 'negative'` returns the strongest *dislikes*, most negative first.
+ * A user profile is signed (see reco/profile.ts), so both halves are real
+ * preferences and both are worth showing.
+ *
+ * Slot names come from the frozen TAXONOMY_LAYOUT via describeSlot, never from
+ * hand-written offsets, so this stays correct if the layout ever changes.
+ * `unknown` slots cannot appear: encodeFeatures writes them as zero, so they are
+ * excluded by the sign test rather than by a special case.
+ */
+export function topDimensions(
+  vec: readonly number[],
+  topN = 8,
+  direction: 'positive' | 'negative' = 'positive',
+): Contribution[] {
+  const wanted = direction === 'positive' ? 1 : -1;
   const terms: Contribution[] = [];
   for (let i = 0; i < TAXONOMY_DIM; i++) {
     const value = vec[i] ?? 0;
-    if (value > 0) terms.push({ dimension: describeSlot(i), contribution: value });
+    if (Math.sign(value) === wanted) {
+      terms.push({ dimension: describeSlot(i), contribution: value });
+    }
   }
-  terms.sort((a, b) => b.contribution - a.contribution);
+  // Strongest first in both directions: largest positive, or most negative.
+  terms.sort((a, b) =>
+    direction === 'positive' ? b.contribution - a.contribution : a.contribution - b.contribution,
+  );
   return terms.slice(0, topN);
+}
+
+export interface ProfileExplanation {
+  positive: Contribution[];
+  negative: Contribution[];
+}
+
+/** Both halves of a signed profile, for the debug endpoint and the demo panel. */
+export function explainProfile(vec: readonly number[], topN = 5): ProfileExplanation {
+  return {
+    positive: topDimensions(vec, topN, 'positive'),
+    negative: topDimensions(vec, topN, 'negative'),
+  };
 }
 
 /**

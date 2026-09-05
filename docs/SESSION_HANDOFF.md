@@ -1,9 +1,61 @@
-# Session handoff — M4 complete, M5 next
+# Session handoff — M5 complete, M6 next
 
 Durable checkpoint. Self-contained: everything needed to resume is here or in the
 files it names.
 
-**Date:** 2026-09-05 · **HEAD:** `bd79ff4` · **Nothing staged, nothing committed.**
+**Date:** 2026-09-05 · **M4 committed as `6d48ed2`** · **M5 implemented, not yet committed.**
+
+---
+
+## M5 — user interactions and profile: DONE
+
+```
+profile = Σ(eventWeight × timeDecay × videoVector) / Σ|eventWeight × timeDecay|
+decay   = 0.5 ^ (ageDays / halfLifeDays)
+```
+
+| Event | Weight | | Event | Weight |
+|---|---:|---|---|---:|
+| `impression` | 0.00 | | `like` | +1.00 |
+| `view` / `watch` | +0.25 | | `skip` | −0.50 |
+| `complete` | +0.60 | | `dislike` | −1.00 |
+
+Half-life 7 days (`PROFILE_HALFLIFE_DAYS`), cold start below 5 effective signals
+(`COLD_START_MIN_INTERACTIONS`) — both already existed in config from M1 and were
+reused, not re-invented.
+
+**Decisions worth not re-litigating:**
+
+- **Reused the `events` table** instead of adding an `interactions` table. `events`
+  already had the enum, `watchMs`, `positionPct` (= watch ratio) and the right
+  indexes; a second table would have been a parallel mechanism for the same thing.
+  Added `event_id` (unique, nullable) for idempotency and `dislike` to the enum.
+- **Weights are constants in `src/reco/signals.ts`, not env vars.** Six knobs nobody
+  turns in a one-week MVP is deployment surface without capability.
+- **Creator affinity is a separate table**, never a taxonomy dimension: creator
+  identity is not content, and folding it in would force a re-embed whenever the
+  creator set changed. Ranking feature in M6, never a hard filter.
+- **Negative dimensions are not clamped.** A positive-only profile cannot recover
+  from a bad streak.
+- **Normalised by Σ|signal|**, so profiles are comparable across users and repeating
+  an interaction reinforces rather than inflates.
+- **Full rebuild per write** is the MVP choice; `computeProfile()` is pure so the
+  production streaming path reuses it unchanged.
+- **`watch` is not accepted by the API.** The M1 enum shipped both `view` and
+  `watch` meaning the same thing; with equal weights a client emitting both for one
+  playback would have contributed +0.50 instead of +0.25. `watch` keeps its weight
+  so any legacy row still scores, but intake accepts only the canonical six types
+  (`ACCEPTED_EVENT_TYPES`), which `GET /signals` advertises. Watch *duration* rides
+  on `positionPct`, not on a second event type.
+
+New: `src/reco/{signals,profile,interactions}.ts`, `src/api/server.ts` (POST
+`/interactions`, GET `/users/:id/profile`, `/signals`, `/health`),
+`scripts/{seed-users,simulate-events}.ts`, migration `0003`, 43 tests.
+
+Also fixed a latent bug: `src/db/migrations/meta/0002_snapshot.json` carried a UTF-8
+BOM that made `npm run db:generate` fail for anyone, including a clean clone.
+
+`npm run demo:profile -- --reset` runs the deterministic two-user scenario.
 
 ---
 
@@ -141,9 +193,8 @@ Two known findings deliberately left alone, both recorded:
 
 ### Checks
 
-`typecheck 0` · `lint 0` · `tests 181 passed, 5 skipped` (with `TEST_INTEGRATION=1`;
-without it the 2 integration files are skipped and the count is 158) ·
-`check:env` in sync
+`typecheck 0` · `lint 0` · `tests 224 passed, 5 skipped` (with `TEST_INTEGRATION=1`;
+without it the 3 integration files are skipped) · `check:env` in sync at 78 keys
 
 ---
 
@@ -160,19 +211,27 @@ without the owner's confirmation.
 |---|---|---|
 | M0–M3 | infra, taxonomy v2, ingestion, DEV-15, preprocessing | **DONE** |
 | M4 | VLM analysis + model selection | **DONE** |
-| **M5** | **user interactions + user profile** | **NEXT** |
-| M6 | candidate generation + ranking + diversity | planned |
+| M5 | user interactions + user profile | **DONE** |
+| **M6** | **candidate generation + ranking + diversity** | **NEXT** |
 | M7 | feed serving + Redis precomputation | planned |
 | M8 | minimal demo + architecture + documentation | planned |
 | M8.4–M8.6 | GOLD-30/HOLDOUT prep, quality optimization, held-out eval | after MVP |
 | M9 | scraper | optional bonus |
 | M10 | final polish, clean-clone check, demo rehearsal | planned |
 
-**M5 — user interactions and user profile**, to start only after the owner confirms
-the VM is deleted.
+**M6 — candidate generation, ranking and diversity.** It consumes what M5 built:
 
-Ordering already decided: events (impression, view, watch time, completion, like,
-skip) → profile vector with decay → cold start. Then M6 (five candidate sources →
-union → dedup → filter → rank → diversity), M7 (Redis-first `GET /feed`), M8 (UI,
-docs, demo). Scraper is the bonus at the end. Full milestone table, quality-work
-strategy and cutting rules: [ROADMAP.md](ROADMAP.md).
+| M5 output | M6 use |
+|---|---|
+| `user_profiles.embedding` | pgvector similarity candidates |
+| `user_profiles.tag_affinity` | tag candidates over the jsonb features |
+| `user_creator_affinity` | ranking feature — never a hard filter |
+| `is_cold_start` | which sources a user gets when there is no taste yet |
+| negative dimensions | active dislikes, not absence of evidence |
+
+Shape already decided: five candidate sources → union → dedup → filter → rank →
+diversity, with the numeric ranking features (aesthetic, freshness, popularity,
+creator affinity, exploration) kept outside the taxonomy vector. Then M7
+(Redis-first `GET /feed`), M8 (UI, docs, demo). Scraper is the bonus at the end.
+Full milestone table, quality-work strategy and cutting rules:
+[ROADMAP.md](ROADMAP.md).

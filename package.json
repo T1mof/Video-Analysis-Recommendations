@@ -27,6 +27,7 @@
     "preprocess": "tsx scripts/preprocess.ts",
     "analyze": "tsx scripts/analyze.ts",
     "simulate": "tsx scripts/simulate-events.ts",
+    "demo:profile": "tsx scripts/simulate-events.ts",
     "rebuild-feeds": "tsx scripts/rebuild-feeds.ts",
     "cost-model": "tsx scripts/cost-model.ts",
     "bench-vlm": "tsx scripts/bench-vlm.ts",

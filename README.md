@@ -6,7 +6,9 @@ model and the path to high load — not on feature count.
 
 **What works today:** local corpus ingestion → adaptive frame sampling → real
 vision-model analysis into a closed taxonomy → 110-dimension content vectors in
-pgvector. The recommender, feed API and demo UI are the next milestones.
+pgvector → user interactions into a signed, time-decayed preference profile with
+creator affinity. Candidate generation, ranking, the feed API and the demo UI are
+the next milestones.
 
 ---
 
@@ -198,6 +200,60 @@ Put credentials in `.env`, which is gitignored. Never commit an API key.
 **Check the provider's content policy first.** A general-purpose hosted API may
 refuse explicit adult material outright, which is the main reason this design
 targets self-hosting.
+
+---
+
+## User profiles
+
+Interactions become a signed, time-decayed preference vector in the same
+110-dimension space as the videos, plus a per-creator affinity score.
+
+```bash
+npm run seed                    # two demo users, plus one deliberately cold
+npm run demo:profile -- --reset # deterministic scenario, prints the profiles
+```
+
+The demo has two users react to the *same* corpus in opposite ways and shows the
+resulting preferences, dislikes, creator affinity and cold-start status:
+
+```
+demo_alice
+  interactions 24   effective 12   cold start: no
+  likes     explicitness:suggestive  0.097   actType:talking  0.092
+  dislikes  explicitness:explicit   -0.075   cameraStyle:pov -0.049
+  creator   demo_creator_01  0.376      demo_creator_09  -0.341
+```
+
+The formula, and why negative preferences and time decay both matter, is in
+[ARCHITECTURE.md](ARCHITECTURE.md#user-interactions-and-the-preference-profile):
+
+```
+profile = Σ(eventWeight × timeDecay × videoVector) / Σ|eventWeight × timeDecay|
+decay   = 0.5 ^ (ageDays / halfLifeDays)
+```
+
+### Interaction API
+
+```bash
+npm run dev:api
+```
+
+| Route | Purpose |
+|---|---|
+| `POST /interactions` | Record one interaction; `eventId` makes retries idempotent |
+| `GET /users/:userId/profile` | Cold-start status, top likes and dislikes, creator affinity |
+| `GET /signals` | The event weights, half-life and cold-start threshold in force |
+| `GET /health` | Liveness plus the taxonomy version the process was built against |
+
+```bash
+curl -X POST localhost:3000/interactions -H 'content-type: application/json' \
+  -d '{"eventId":"evt-1","userId":"<uuid>","videoId":"<uuid>","type":"like","watchRatio":0.9}'
+
+curl localhost:3000/users/<uuid>/profile
+```
+
+`GET /feed` deliberately does not exist yet — it is M7, and it must be a Redis read
+rather than anything that recomputes recommendations per request.
 
 ---
 

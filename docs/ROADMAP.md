@@ -13,8 +13,8 @@ Updated 2026-09-05, after M4 closed.
 | **M2b** | Gold **DEV-15** — 15 hand-reviewed videos | **DONE** |
 | **M3** | Video preprocessing — adaptive sampling, dHash dedupe, contact sheets | **DONE** |
 | **M4** | VLM analysis + model selection | **DONE** |
-| **M5** | User interactions + user profile | **NEXT** |
-| **M6** | Candidate generation + ranking + diversity | planned |
+| **M5** | User interactions + user profile | **DONE** |
+| **M6** | Candidate generation + ranking + diversity | **NEXT** |
 | **M7** | Feed serving + Redis precomputation | planned |
 | **M8** | Minimal demo + architecture + documentation | planned |
 | **M8.4** | GOLD-30 / HOLDOUT-15 preparation | after MVP |
@@ -25,6 +25,27 @@ Updated 2026-09-05, after M4 closed.
 
 **M8.4–M8.6 do not block MVP readiness.** The critical path to a demoable system is
 M5 → M6 → M7 → M8, and nothing in the quality work may delay it.
+
+## What M5 delivered
+
+Interactions → signed, time-decayed preference profile in the same 110-dimension
+space as the videos, plus creator affinity and a cold-start flag.
+
+```
+profile = Σ(eventWeight × timeDecay × videoVector) / Σ|eventWeight × timeDecay|
+decay   = 0.5 ^ (ageDays / halfLifeDays)          half-life 7 days
+cold    = effectiveSignalCount < 5
+```
+
+Reused the `events` table and the `PROFILE_HALFLIFE_DAYS` / `COLD_START_MIN_INTERACTIONS`
+config laid down in M1 rather than introducing a parallel mechanism; added
+idempotency (`events.event_id`), profile diagnostics columns and a
+`user_creator_affinity` table. Full reasoning in
+[ARCHITECTURE.md](../ARCHITECTURE.md#user-interactions-and-the-preference-profile).
+
+M6 consumes this: the profile vector for similarity candidates, `tag_affinity` for
+tag candidates, `user_creator_affinity` as a ranking feature, and `is_cold_start`
+to decide which sources a user gets.
 
 ## Current VLM baseline — frozen
 

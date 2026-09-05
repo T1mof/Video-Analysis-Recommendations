@@ -1,6 +1,6 @@
 {
-  "id": "f13827cd-17fd-47d3-84a1-7cc612983d6a",
-  "prevId": "8ff635dc-a68f-4382-9cc1-8eb35de61c63",
+  "id": "165e67dd-cd14-4243-9faa-50e0898181c2",
+  "prevId": "f13827cd-17fd-47d3-84a1-7cc612983d6a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -13,6 +13,12 @@
           "type": "bigserial",
           "primaryKey": true,
           "notNull": true
+        },
+        "event_id": {
+          "name": "event_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         },
         "user_id": {
           "name": "user_id",
@@ -89,6 +95,42 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "events_user_video_idx": {
+          "name": "events_user_video_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "video_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "events_event_id_uniq": {
+          "name": "events_event_id_uniq",
+          "columns": [
+            {
+              "expression": "event_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -120,6 +162,95 @@
         }
       },
       "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
+    "public.user_creator_affinity": {
+      "name": "user_creator_affinity",
+      "schema": "",
+      "columns": {
+        "user_id": {
+          "name": "user_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "creator_id": {
+          "name": "creator_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "score": {
+          "name": "score",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "interaction_count": {
+          "name": "interaction_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        }
+      },
+      "indexes": {
+        "user_creator_affinity_top_idx": {
+          "name": "user_creator_affinity_top_idx",
+          "columns": [
+            {
+              "expression": "user_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "score",
+              "isExpression": false,
+              "asc": false,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "user_creator_affinity_user_id_users_id_fk": {
+          "name": "user_creator_affinity_user_id_users_id_fk",
+          "tableFrom": "user_creator_affinity",
+          "tableTo": "users",
+          "columnsFrom": [
+            "user_id"
+          ],
+          "columnsTo": [
+            "id"
+          ],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {
+        "user_creator_affinity_user_id_creator_id_pk": {
+          "name": "user_creator_affinity_user_id_creator_id_pk",
+          "columns": [
+            "user_id",
+            "creator_id"
+          ]
+        }
+      },
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},
@@ -160,6 +291,41 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
+        },
+        "effective_signal_count": {
+          "name": "effective_signal_count",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "positive_signal": {
+          "name": "positive_signal",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "negative_signal": {
+          "name": "negative_signal",
+          "type": "double precision",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "skipped_no_features": {
+          "name": "skipped_no_features",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
+        },
+        "is_cold_start": {
+          "name": "is_cold_start",
+          "type": "boolean",
+          "primaryKey": false,
+          "notNull": true,
+          "default": true
         },
         "updated_at": {
           "name": "updated_at",
@@ -811,7 +977,8 @@
         "watch",
         "complete",
         "like",
-        "skip"
+        "skip",
+        "dislike"
       ]
     },
     "public.video_status": {
