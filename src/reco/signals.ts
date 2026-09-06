@@ -60,6 +60,31 @@ export function isMeaningful(type: SignalEvent): boolean {
   return eventWeight(type) !== 0;
 }
 
+/**
+ * Whether this event should invalidate the user's cached feed immediately.
+ *
+ * Exactly the preference-changing events, which for this taxonomy of signals is
+ * the same set as the weighted ones - but the two are stated separately because
+ * they answer different questions, and a future zero-weight event that *did*
+ * change ranking would need this to diverge.
+ *
+ * `impression` is the case that matters. It is recorded, and it makes the video
+ * "seen" for the next build, but it must not force a rebuild: a client that
+ * displays ten items sends ten impressions, and invalidating on each would bump
+ * the epoch ten times. Epoch is the deduplication key, so ten epochs means ten
+ * distinct builds - the deduplication that protects against a cache-miss stampede
+ * cannot help here, because every event legitimately creates a new key.
+ *
+ * The trade is freshness against rebuild amplification: an impression affects the
+ * *next* generation rather than forcing one now, and the user keeps reading the
+ * generation they are scrolling through instead of having it pulled out from under
+ * them. Production would coalesce these in a stream processor rather than deciding
+ * per event; that debounce is deliberately not built here.
+ */
+export function invalidatesFeed(type: SignalEvent): boolean {
+  return isMeaningful(type);
+}
+
 const MS_PER_DAY = 86_400_000;
 
 export function ageInDays(at: Date, now: Date = new Date()): number {

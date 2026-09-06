@@ -114,7 +114,7 @@ The vectors are not the only thing downstream of the taxonomy. Anything computed
 |---|---|
 | `user_profiles.embedding` | A sum of video vectors in the old space |
 | `user_profiles.tagAffinity` | Mirrors the profile vector; keys are `TAXONOMY_LAYOUT` tags, some of which no longer exist |
-| Prepared feeds in Redis (`feed:{userId}`) | Ranked and ordered using old-space similarity, and may reference videos that went back to `ingested` |
+| Prepared feeds in Redis (`feed:gen:{userId}:{feedId}`) | Ranked and ordered using old-space similarity, and may reference videos that went back to `ingested` |
 
 **Rule: a taxonomy version change invalidates every prepared feed.** After steps
 1–4, profiles are rebuilt from the event log and every cached feed is dropped and
@@ -123,12 +123,11 @@ in a space that no longer exists. Serving one after a taxonomy change would show
 users a feed ordered by a similarity metric the system can no longer reproduce or
 explain.
 
-Feed rebuilds go through the existing explicit path (`POST /admin/feeds/rebuild`
-and the prewarm at seed time), so no extra Redis machinery is needed for this — the
-migration flushes the feed keys and lets the normal rebuild repopulate them. The
-Redis-side implementation lands with the feed serving milestone; the ordering
-constraint is recorded here because it is a property of the migration, not of the
-cache.
+No extra Redis machinery is needed for this. Bumping each affected user's feed
+epoch drops the active pointer and queues a rebuild through the same path an
+interaction uses (see "Serving the feed"), so the migration invalidates and the
+normal build path repopulates. The ordering constraint is recorded here because it
+is a property of the migration, not of the cache.
 
 For an **append-only** change, re-encoding does not require re-running the VLM: raw
 model output is retained in `video_features.raw`, so steps 2 and 3 are a local
@@ -955,45 +954,266 @@ GET /feed  →  Fastify  →  Redis  →  response
 ```
 
 That is the whole request path. There is **no** code path from an HTTP request to
-pgvector or to the ranker — not as a fallback, not behind a flag, not with a
-timeout. This is the property the 3k RPS design rests on, so it is enforced by
-construction rather than by configuration.
+Postgres, pgvector or the ranker — not as a fallback, not behind a flag, not with a
+timeout. It is enforced by what `src/feed/service.ts` imports rather than by
+discipline: the module that answers requests cannot reach the recommender, and a
+test makes the recommender throw to prove it stays that way.
 
-### How feeds get into Redis
+### Cold path
 
-| Route | Trigger |
+```
+cache miss / invalidation / refill
+        ↓
+    BullMQ job  (deduplicated on user + epoch)
+        ↓
+    feed worker      ← its own process: npm run worker:feed
+        ↓
+    recommendCandidates()   ← M6, the only caller
+        ↓
+    Redis generation + active pointer
+```
+
+### Redis model
+
+| Key | Holds | TTL |
+|---|---|---|
+| `feed:{userId}:epoch` | integer, bumped on every state change | none |
+| `feed:{userId}:active` | the feedId a new session starts on | `FEED_TTL_SECONDS` (3600) |
+| `feed:gen:{userId}:{feedId}` | the generation, immutable once written | 2 × TTL |
+
+**Generations are immutable.** A rebuild writes a new feedId and flips the pointer;
+it never edits a published feed. That is what lets a cursor keep reading the list it
+started on instead of having items shift underneath a scrolling client. The
+generation outlives the pointer (2 × TTL, derived rather than a new config knob)
+for the same reason: the pointer answers "what does a new session get?", the
+generation answers "what is this session reading?".
+
+Publishing writes the payload **then** moves the pointer. The reverse order would
+briefly name a feed that does not exist, and every reader would see a miss and queue
+another build.
+
+The cached payload is deliberately thin — videoId, rank, creatorId, plus generation
+metadata. No taxonomy vectors, no score breakdown, no captions: those live in
+Postgres and in the recommender's diagnostics, and a cache exists to be read fast.
+A 16-item generation serialises to about 1.5 KB.
+
+### Epochs: why a slow build cannot overwrite a fast one
+
+```
+job A starts (epoch 1) → user likes something (epoch 2) → job B builds and publishes
+                                                        → job A finishes last
+```
+
+Without a guard, A overwrites a fresh feed with a stale one. The worker re-reads the
+epoch immediately before publishing and discards its result if it no longer matches.
+A discarded build is a normal outcome, not a failure — the newer job already
+published something better.
+
+`INCR` is atomic, so two concurrent interactions cannot land on the same epoch, and
+the epoch doubles as the deduplication key: a hundred simultaneous cache misses for
+one user collapse into one logical build, while a genuine state change always gets
+its own. Deduplication uses BullMQ's own `deduplication: { id, keepLastIfActive }`
+rather than a hand-rolled lock or a `jobId` — verified against the installed 6.3.x,
+where `jobId` dedupe stops working as soon as the completed job is evicted.
+
+### Invalidation
+
+```
+POST /interactions → event persisted → profile rebuilt → INCR epoch → drop pointer → queue rebuild
+```
+
+| Event | Profile | Marks seen | Invalidates feed | Rebuild |
+|---|---|---|---|---|
+| `impression` | no change (weight 0) | **yes** | **no** | deferred to the next build |
+| `view` | +0.25 | yes | yes | queued |
+| `complete` | +0.60 | yes | yes | queued |
+| `like` | +1.00 | yes | yes | queued |
+| `skip` | −0.50 | yes | yes | queued |
+| `dislike` | −1.00 | yes | yes | queued |
+| *duplicate of any* | no change | no change | **no** | none |
+
+**`impression` is the deliberate exception.** It is recorded, and it makes the video
+seen for the *next* build — but it does not force one now. A client displaying ten
+items sends ten impressions, and since the epoch is the deduplication key, ten
+epochs means ten distinct builds: the mechanism that protects against a cache-miss
+stampede cannot help, because each event legitimately creates a new key.
+
+The trade is freshness against rebuild amplification, and it buys session stability
+as well: a user scrolling a generation keeps reading it instead of having it
+replaced underneath them by their own scrolling. The impression is not lost — the
+next build, triggered by a real preference signal or by TTL, excludes the video.
+
+A **duplicate** event invalidates nothing whatever its type: it changed no state, and
+bumping the epoch again would discard a valid feed to rebuild an identical one.
+
+The epoch bump and the pointer drop go in **one MULTI/EXEC**. Sent as two loose
+commands, a connection drop between them would leave the epoch advanced while the
+pointer survived - so `/feed` would keep serving a generation that predates the
+interaction until the TTL expired an hour later.
+
+The queue write is deliberately outside that transaction: Redis MULTI cannot span
+BullMQ job bookkeeping, and making them atomic would need a distributed
+transaction. Ordering is what makes it safe - invalidate first, then queue - so a
+failed enqueue leaves a cache **miss**, which the next GET repairs by queueing the
+build itself. The failure mode is a delayed rebuild, never a wrong feed. The
+response reports `feedInvalidated` and `rebuildQueued` separately, because those
+are two facts and one of them can be true without the other.
+
+The interaction is the primary operation and the feed refresh is a side effect. If
+Redis or the queue is down, the interaction stays committed in Postgres and the
+failure is logged. Failing the write to protect a derived cache would lose user data
+to preserve something rebuildable. Production closes that gap with a transactional
+outbox; a queue write inside the database transaction would only move the problem.
+
+### TTL and freshness are different mechanisms
+
+- **TTL** bounds how long a feed may live if nothing happens. It is a backstop
+  against indefinitely stale cache, not a freshness guarantee.
+- **Invalidation** is what actually keeps feeds fresh, and it is immediate and
+  event-driven.
+
+A user who interacts gets a new feed in seconds regardless of TTL; a user who does
+nothing for an hour gets a rebuild because the pointer expired.
+
+### Refill
+
+When a client comes within `FEED_REFILL_WATERMARK` (10) items of the end of a
+generation, the next one is queued in the background. The request is always served
+from the current generation — refill never blocks or changes what is returned.
+
+Two guards stop it becoming a treadmill: it is deduplicated per generation, so
+paging through the tail queues one build rather than one per request; and it is
+skipped when the generation reported `candidateShortage` or is empty. Rebuilding
+cannot invent videos that do not exist, so on a small or fully-seen corpus a refill
+would rebuild the same short list forever.
+
+### Cursor semantics
+
+An opaque base64url cursor encoding version, userId, feedId and offset. Page numbers
+would be wrong here: the feed can be rebuilt between requests, so "page 3" would
+silently mean a different slice of a different list.
+
+It is validated, not trusted — length-capped before decoding, version-checked, and
+rejected outright if it names a different user. The Redis key is built from the
+requesting user plus the feedId, so a cursor cannot address another user's feed or
+inject an arbitrary key. It is not signed: the project has no secret to sign with,
+everything it encodes is already known to the client, and validation catches what
+signing would.
+
+### What each response means
+
+| Status | Meaning |
 |---|---|
-| **Prewarm** | `npm run seed` builds demo users' feeds up front; signup triggers the same job in production |
-| **Event-driven rebuild** | The event worker debounces a rebuild per user (every N events or T seconds) |
-| **Watermark refill** | `/feed` enqueues a refill job when remaining cached items drop below `FEED_REFILL_WATERMARK` |
-| **Explicit rebuild** | `POST /admin/feeds/rebuild` and `npm run rebuild-feeds` — the operator lever |
+| `200` | Served from cache |
+| `202` | No feed yet; a build was queued. The API did not compute anything |
+| `400` | Bad request, or a malformed cursor / one belonging to another user |
+| `404` | Unknown user |
+| `410` | The cursor was valid but its generation has expired — start a new session |
+| `503` | The feed cache is unavailable |
 
-### Cache miss
+An **empty feed is a ready answer**, cached like any other. Treating it as a miss
+would queue a build on every request forever.
 
-A personalised-feed miss is served from a **precomputed global trending feed**,
-also in Redis, refreshed on a timer by a background worker
-(`TRENDING_FEED_REFRESH_SECONDS`). A miss therefore costs one extra Redis read and
-nothing else.
+**503 rather than a synchronous rebuild** is the important one. Computing feeds in
+the API process during a Redis outage converts a cache failure into a database
+stampede at the moment the system is least able to absorb one.
+
+### Generation retention
+
+TTL bounds how *old* a generation may be. It does not bound how *many* exist — a
+user who interacts twenty times in two hours would hold twenty live payloads, and
+any per-user memory estimate built on "one feed each" would be wrong by that factor.
+
+At most **two generations per user** are retained: the current one and the one it
+replaced. Kept in a per-user index list (`feed:{userId}:generations`, newest first)
+so eviction reads that list instead of globbing the keyspace — `KEYS`/`SCAN` is O(n)
+over the whole database and has no business near this code. TTL stays as a
+secondary cleanup for abandoned users; it is no longer the only thing bounding
+memory.
+
+Two is the smallest number that keeps a cursor working across a refresh, which is
+the case that matters: a client mid-scroll when a rebuild lands. A cursor into the
+generation before that returns 410 and the client starts a new session. It is a
+module constant rather than a config knob — a property of the caching strategy, not
+something an operator tunes.
+
+| After | Retained | An old cursor gets |
+|---|---|---|
+| 1st build | `[g1]` | — |
+| 2nd build | `[g2, g1]` | `g1` still readable → 200 |
+| 3rd build | `[g3, g2]` | `g1` evicted → 410 |
+
+### Measured locally
+
+30 videos, one process, in-process HTTP injection:
+
+| | |
+|---|---|
+| Cache hit | mean 1.9 ms · p50 1.9 ms · p95 2.0 ms (50 requests) |
+| Cold miss (enqueue only) | 2.7 ms |
+| Background build (M6 + publish) | ~12 ms |
+| Generation payload | 1,536 bytes for 16 items ≈ **96 B/item** |
+
+**Memory, honestly bounded.** At the measured ~96 B per item, a full 50-item
+generation is ~4.8 KB, and two retained generations per user is ~9.6 KB:
 
 ```
-GET /feed
-   │
-   ▼
-Redis: feed:{userId}  ──hit──▶  response
-   │
-  miss
-   │
-   ▼
-Redis: feed:global:trending  ──▶  response  (+ enqueue a personalised rebuild)
+~1 GB payload-only lower-bound estimate for 100k users
+at two retained 50-item generations; actual Redis memory is higher.
 ```
 
-This matters beyond tidiness. A synchronous rebuild on miss — even one that is
-off by default and timeout-bounded — is a **cache stampede waiting to happen**: the
-moment Redis restarts or a deploy invalidates feeds, every concurrent request
-simultaneously discovers a miss and starts doing pgvector work. The precomputed
-trending feed converts that failure mode from "the ranker melts under 3k RPS" into
-"users briefly see non-personalised content", which is a degradation rather than an
-outage.
+Higher because payloads are not the only thing stored: Redis per-key object
+overhead, the active pointer, the epoch counter, the generation index, BullMQ's own
+structures, and allocator fragmentation all add to it. How much is not guessed here
+— it needs measuring against a populated instance, which this project has not done.
+
+These figures say the hot path is a Redis read. They say nothing about 3k RPS,
+which needs load testing that has not been done either.
+
+### Future work, deliberately not implemented
+
+Recorded so the design is not lost and so nothing above reads as already built.
+
+**Trending fallback on a cache miss.** Earlier revisions of this document described
+a miss being served from a **precomputed global trending feed** — degradation
+instead of a 202. It is a better client experience, and it remains the natural next
+step, but it is **not implemented in M7**: a miss answers `202 building`. Both
+avoid the stampede, which is the property that matters; the trending feed
+additionally avoids showing a new user an empty screen. `TRENDING_FEED_SIZE` and
+`TRENDING_FEED_REFRESH_SECONDS` exist in config and are **reserved for this** — they
+have no consumer in the current code, and are marked as such in `env.ts`.
+
+**An operator rebuild lever.** `POST /admin/feeds/rebuild` and an
+`npm run rebuild-feeds` command were previously listed here as if they existed.
+They do not, and the npm entry has been removed rather than left to fail. Rebuilds
+are triggered by interaction, cache miss and refill; nothing yet needs a manual one.
+
+**Durable invalidation delivery.** Postgres interaction persistence and Redis feed
+invalidation are not one distributed transaction. If Redis is unavailable after the
+primary Postgres write, the interaction remains durable, but invalidation delivery
+is best-effort in the MVP. Production evolution is a transactional outbox / durable
+event stream that retries profile/feed invalidation until acknowledged.
+
+Concretely, the window is this: the interaction commits, the `MULTI/EXEC` then fails
+because Redis is down, and nothing retries it. The user keeps their existing feed
+until its TTL expires — at most `FEED_TTL_SECONDS` — and any later interaction that
+does reach Redis invalidates it anyway. So the consequence is bounded staleness
+rather than permanent divergence, which is why the MVP accepts it. What it does not
+have is a *guarantee*, and that is what the outbox buys.
+
+**Interaction coalescing / debounce.** Impressions already defer to the next
+generation (see the invalidation matrix), but the preference-changing events have
+the same shape at scale: a single playback can legitimately emit `view` →
+`complete` → `like`, and each one currently bumps the epoch and queues a build. That
+is correct — the stale-epoch guard means only the last one publishes, and BullMQ's
+deduplication and bounded retries keep it contained — but it is three builds where
+one would do.
+
+A production system would coalesce the events of one playback in a stream processor
+and rebuild once per window per user, recovering the wasted builds without giving up
+freshness. **Not implemented here**: a debounce window is a tuning decision, and
+tuning it without production traffic to measure against is guesswork. The MVP
+accepts the extra builds because correctness does not depend on avoiding them.
 
 ## Serving 3,000 requests per second
 

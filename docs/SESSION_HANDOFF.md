@@ -1,9 +1,9 @@
-# Session handoff — M6 complete, M7 next
+# Session handoff — M7 complete, M8 next
 
 Durable checkpoint. Self-contained: everything needed to resume is here or in the
 files it names.
 
-**Date:** 2026-09-06 · **M4 = `6d48ed2` · M5 = `b889295`** · M6 implemented, not yet committed.
+**Date:** 2026-09-06 · **M4 `6d48ed2` · M5 `b889295` · M6 `1ace4e1`** · M7 implemented, not yet committed.
 
 ---
 
@@ -148,6 +148,82 @@ an SSH tunnel; never expose the endpoint.
 
 ---
 
+## M7 — feed serving, Redis cache, API: DONE
+
+```
+GET /feed            -> Redis -> response                  (~2 ms locally)
+miss / invalidation  -> BullMQ -> feed worker -> M6 -> Redis  (~12 ms build)
+```
+
+Modules: `src/feed/{cache,cursor,queue,service,worker}.ts`, entrypoint
+`src/workers/feed.ts` (`npm run worker:feed`), demo `npm run demo:feed`.
+
+Redis keys: `feed:{userId}:epoch` (no TTL), `feed:{userId}:active` (TTL 3600),
+`feed:{userId}:generations` (index list), `feed:gen:{userId}:{feedId}` (TTL 2×3600,
+at most 2 retained).
+
+Memory: measured ~96 B/item, so ~1 GB payload-only lower bound for 100k users at two
+retained 50-item generations; real Redis usage is higher (key overhead, index,
+BullMQ, fragmentation) and was not measured.
+
+**Decisions worth not re-litigating:**
+
+- **No new env keys, no migrations, no dependencies.** `FEED_SIZE`,
+  `FEED_TTL_SECONDS`, `FEED_REFILL_WATERMARK` already existed from M1.
+- **Immutable generations behind an active pointer.** A rebuild publishes a new
+  feedId; a cursor keeps reading the list it started on. Generations outlive the
+  pointer 2:1 so a refresh does not break an open session.
+- **Publish order is payload then pointer.** The reverse briefly names a feed that
+  does not exist, and every reader would see a miss and queue another build.
+- **Epoch (`INCR`) guards publication.** The worker re-reads it before publishing
+  and discards a stale result — that is a normal outcome, not a failure. The same
+  epoch is the BullMQ dedupe key.
+- **BullMQ native `deduplication: { id, keepLastIfActive }`**, verified against the
+  installed 6.3.x. `jobId` dedupe would have been wrong: it stops deduplicating once
+  the completed job is evicted.
+- **`impression` does NOT invalidate.** It is recorded and makes the video seen for
+  the *next* build, but forces no rebuild: a client showing ten items sends ten
+  impressions, and since the epoch is the dedupe key, ten epochs means ten builds —
+  the mechanism that stops a cache-miss stampede cannot help. Preference-changing
+  events (`view`, `complete`, `like`, `skip`, `dislike`) invalidate immediately. A
+  **duplicate** invalidates nothing whatever its type. **Production evolution:
+  interaction coalescing / debounce** — one playback can emit `view` → `complete` →
+  `like`, three epoch bumps and three builds where one would do. Correct as it
+  stands (stale-epoch guard means only the last publishes, BullMQ is bounded), but a
+  stream processor should collapse them per window. Deliberately not built: a
+  debounce window is a tuning decision with no production traffic to tune against.
+- **The `setMaxListeners` calls are gone, and so is the leak they hid.** The
+  "possible EventEmitter memory leak" warning was real: `cacheConnection()`
+  registered its error handler outside the memoisation block, leaking one listener
+  per cache operation (2 → 57 → 108 → 159 → 210 across measured waves). Fixed by
+  registering it with the connection; counts are now flat at 1. Guarded by
+  `tests/integration/redisListeners.test.ts`.
+- **At most two generations per user** (`MAX_RETAINED_GENERATIONS_PER_USER`), tracked
+  in a per-user index list so eviction never touches `KEYS`/`SCAN`. TTL bounds how
+  *old* a generation is, not how *many* exist — without this, twenty rebuilds in two
+  hours meant twenty live payloads and a memory estimate wrong by that factor. Two is
+  the smallest number that lets a cursor survive one refresh; the generation before
+  that returns 410.
+- **Invalidation is one MULTI/EXEC** (`INCR epoch` + `DEL active`). Two loose
+  commands would let a connection drop advance the epoch while the pointer survived,
+  serving a pre-interaction feed until TTL. The queue write stays outside it -
+  invalidate first, queue second - so a failed enqueue leaves a miss the next GET
+  repairs, never a stale feed. `feedInvalidated` and `rebuildQueued` are reported
+  separately because either can be true without the other.
+- **Redis/queue failure never rolls back a stored interaction.** Postgres is the
+  primary write; the refresh is a side effect. **Invalidation delivery is therefore
+  best-effort in the MVP**: if Redis is down when the transaction runs, nothing
+  retries it, and the user keeps their existing feed until TTL (bounded staleness,
+  not permanent divergence — any later interaction that reaches Redis invalidates
+  it). Production answer is a transactional outbox / durable event stream that
+  retries until acknowledged, not one distributed transaction.
+- **No synchronous fallback.** Miss → 202, cache down → 503. `service.ts` cannot
+  reach the recommender, and a test makes the recommender throw to keep it that way.
+- **Separate Redis client for the request path** (`cacheConnection`): BullMQ needs
+  `maxRetriesPerRequest: null`, which would hang a GET instead of answering 503.
+- **Refill is skipped for an empty generation or a reported candidate shortage** —
+  otherwise every read queues another build forever.
+
 ## M6 — candidate generation, ranking, diversity: DONE
 
 Five sources → union → dedupe → filter → rank → diversify → ordered list.
@@ -251,7 +327,7 @@ Two known findings deliberately left alone, both recorded:
 
 ### Checks
 
-`typecheck 0` · `lint 0` · `tests 299 passed, 5 skipped` (with `TEST_INTEGRATION=1`;
+`typecheck 0` · `lint 0` · `tests 347 passed, 5 skipped` (with `TEST_INTEGRATION=1`;
 without it the 4 integration files are skipped) · `check:env` in sync at 78 keys
 
 ---
@@ -271,8 +347,8 @@ without the owner's confirmation.
 | M4 | VLM analysis + model selection | **DONE** |
 | M5 | user interactions + user profile | **DONE** |
 | M6 | candidate generation + ranking + diversity | **DONE** |
-| **M7** | **feed serving + Redis precomputation** | **NEXT** |
-| M8 | minimal demo + architecture + documentation | planned |
+| M7 | feed serving + Redis cache + API | **DONE** |
+| **M8** | **minimal demo + architecture + documentation** | **NEXT** |
 | M8.4–M8.6 | HOLDOUT-15 prep, VLM quality optimization, held-out eval | after MVP |
 | M8.7 | learned-ranker readiness | optional |
 | M9 | scraper | optional bonus |

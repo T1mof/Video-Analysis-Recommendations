@@ -15,8 +15,8 @@ Updated 2026-09-05, after M4 closed.
 | **M4** | VLM analysis + model selection | **DONE** |
 | **M5** | User interactions + user profile | **DONE** |
 | **M6** | Candidate generation + ranking + diversity | **DONE** |
-| **M7** | Feed serving + Redis precomputation | **NEXT** |
-| **M8** | Minimal demo + architecture + documentation | planned |
+| **M7** | Feed serving + Redis cache + API | **DONE** |
+| **M8** | Minimal demo + architecture + documentation | **NEXT** |
 | **M8.4** | Evaluation dataset preparation — HOLDOUT-15 | after MVP |
 | **M8.5** | VLM quality optimization — pipeline first, models last | after MVP |
 | **M8.6** | Final held-out evaluation | after MVP |
@@ -66,6 +66,24 @@ in [ARCHITECTURE.md](../ARCHITECTURE.md#candidate-generation-ranking-and-diversi
 
 M7 consumes this: `recommendCandidates()` is what a background job calls to fill a
 user's Redis feed. Nothing in M6 runs on the request path.
+
+## What M7 delivered
+
+Background feed builds into an immutable Redis generation behind an active
+pointer; `GET /feed` reads Redis and nothing else.
+
+```
+GET /feed            -> Redis -> response
+miss / invalidation  -> BullMQ (deduped on user+epoch) -> feed worker -> M6 -> Redis
+```
+
+Epoch guards against a slow build overwriting a newer one; every accepted
+interaction invalidates and a duplicate does not; cursors are opaque and bound to
+one user and generation. No synchronous recommendation fallback anywhere: a miss
+is 202, a cache outage is 503. Reused `FEED_SIZE`, `FEED_TTL_SECONDS` and
+`FEED_REFILL_WATERMARK` from M1 - no new env keys, no migrations.
+
+M8 consumes this: the UI is a client of `GET /feed` and `POST /interactions`.
 
 ## Current VLM baseline — frozen
 

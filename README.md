@@ -6,9 +6,9 @@ model and the path to high load — not on feature count.
 
 **What works today:** local corpus ingestion → adaptive frame sampling → real
 vision-model analysis into a closed taxonomy → 110-dimension content vectors in
-pgvector → user interactions into a signed, time-decayed preference profile with
-creator affinity. Candidate generation, ranking, the feed API and the demo UI are
-the next milestones.
+pgvector → user interactions into a signed, time-decayed preference profile →
+multi-source candidate generation, ranking and diversity → background feed builds
+served from Redis over `GET /feed`. The demo UI is the next milestone.
 
 ---
 
@@ -31,7 +31,16 @@ ANALYZE     VisionProvider → closed taxonomy v2 → Zod validation
             → 110-dim vector → Postgres transaction (status=analyzed)
       │
       ▼
-[next]      user profile → candidates → ranking → Redis feed → API + UI
+PROFILE     events → signed, time-decayed preference vector + creator affinity
+      │
+      ▼
+RECOMMEND   5 candidate sources → filter → weighted ranking → diversity
+      │
+      ▼
+SERVE       background build → immutable Redis generation → GET /feed
+      │
+      ▼
+[next]      demo UI
 ```
 
 The design decision that drives everything: **the model never sees the whole
@@ -252,8 +261,52 @@ curl -X POST localhost:3000/interactions -H 'content-type: application/json' \
 curl localhost:3000/users/<uuid>/profile
 ```
 
-`GET /feed` deliberately does not exist yet — it is M7, and it must be a Redis read
-rather than anything that recomputes recommendations per request.
+---
+
+## The feed
+
+`GET /feed` reads Redis and nothing else. Feeds are built in the background by a
+separate worker process, which is the only thing that calls the recommender.
+
+```bash
+npm run dev:api          # HTTP API
+npm run worker:feed      # builds feeds from the queue
+npm run demo:feed        # scripted end-to-end walkthrough
+```
+
+```bash
+curl "localhost:3000/feed?userId=<uuid>&limit=10"
+curl "localhost:3000/feed?userId=<uuid>&limit=10&cursor=<opaque>"
+```
+
+| Status | Meaning |
+|---|---|
+| `200` | Served from cache |
+| `202` | No feed yet — a build was queued; retry shortly |
+| `400` | Bad request, or a cursor that is malformed or belongs to another user |
+| `404` | Unknown user |
+| `410` | Cursor valid but its generation expired — start a new session |
+| `503` | Feed cache unavailable |
+
+A cache miss returns `202`, never a synchronously computed feed. Recomputing in the
+API during a Redis outage turns a cache failure into a database stampede.
+
+Feeds are **immutable generations** behind an active pointer: a rebuild publishes a
+new `feedId` rather than editing the old one, so a cursor keeps reading the list it
+started on. At most two generations are kept per user, so a cursor survives exactly
+one refresh and then gets a 410.
+
+A preference-changing interaction (`view`, `complete`, `like`, `skip`, `dislike`)
+bumps the epoch, drops the pointer and queues a rebuild. An `impression` is recorded
+and makes the video "seen" for the *next* build, but does not force one — ten
+impressions from one screenful would otherwise mean ten rebuilds. Duplicates change
+nothing. Lifecycle, Redis keys and failure semantics are in
+[ARCHITECTURE.md](ARCHITECTURE.md#serving-the-feed).
+
+```
+GET /feed → Redis → response                    (hot path, ~2 ms locally)
+miss/invalidation → BullMQ → feed worker → M6 → Redis   (cold path, ~12 ms)
+```
 
 ---
 

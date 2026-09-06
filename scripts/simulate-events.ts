@@ -73,8 +73,22 @@ function bar(value: number, width = 24): string {
   return (value >= 0 ? '+' : '-').repeat(Math.max(1, filled));
 }
 
-async function main(): Promise<void> {
-  const reset = process.argv.includes('--reset');
+export interface SimulationOptions {
+  /** Clear the demo users' existing events first, so a re-run is reproducible. */
+  reset?: boolean;
+  /** Suppress the report - callers that only need the state, like demo:feed. */
+  quiet?: boolean;
+}
+
+/**
+ * Exported so other demos can re-establish this exact state instead of depending
+ * on whatever the last run happened to leave behind. Without that, repeated demo
+ * runs accumulate interactions until a user has seen the whole corpus and every
+ * feed collapses to a handful of items.
+ */
+export async function runSimulation(options: SimulationOptions = {}): Promise<void> {
+  const reset = options.reset ?? process.argv.includes('--reset');
+  const log = options.quiet ? () => {} : console.log;
 
   await seedUsers();
 
@@ -93,13 +107,13 @@ async function main(): Promise<void> {
     return;
   }
 
-  console.log(`corpus: ${corpus.length} analysed videos`);
-  console.log(
+  log(`corpus: ${corpus.length} analysed videos`);
+  log(
     `weights: like ${EVENT_WEIGHTS.like}  complete ${EVENT_WEIGHTS.complete}  ` +
       `view ${EVENT_WEIGHTS.view}  skip ${EVENT_WEIGHTS.skip}  dislike ${EVENT_WEIGHTS.dislike}  ` +
       `impression ${EVENT_WEIGHTS.impression}`,
   );
-  console.log(
+  log(
     `half-life: ${env.PROFILE_HALFLIFE_DAYS} days   cold start below: ` +
       `${env.COLD_START_MIN_INTERACTIONS} effective signals\n`,
   );
@@ -107,7 +121,7 @@ async function main(): Promise<void> {
   const userIds = DEMO_USERS.map((u) => u.id);
   if (reset) {
     await db.delete(events).where(inArray(events.userId, userIds));
-    console.log('cleared previous demo events (--reset)\n');
+    log('cleared previous demo events (--reset)\n');
   }
 
   const now = Date.now();
@@ -169,48 +183,57 @@ async function main(): Promise<void> {
     const profile = await rebuildUserProfile(scenario.userId);
     const explanation = explainProfile(profile.vector, 5);
 
-    console.log('='.repeat(74));
-    console.log(`${scenario.label}   ${scenario.userId}`);
-    console.log(
+    log('='.repeat(74));
+    log(`${scenario.label}   ${scenario.userId}`);
+    log(
       `  interactions ${profile.interactionCount}   effective ${profile.effectiveSignalCount}` +
         `   cold start: ${profile.isColdStart ? 'YES' : 'no'}`,
     );
-    console.log(
+    log(
       `  signal mass  +${profile.positiveSignal.toFixed(2)} / -${profile.negativeSignal.toFixed(2)}` +
         (profile.skippedNoFeatures
           ? `   (${profile.skippedNoFeatures} events skipped: no analysed features)`
           : ''),
     );
 
-    console.log('\n  likes');
+    log('\n  likes');
     for (const term of explanation.positive) {
-      console.log(`    ${term.dimension.padEnd(34)} ${term.contribution.toFixed(3)} ${bar(term.contribution)}`);
+      log(`    ${term.dimension.padEnd(34)} ${term.contribution.toFixed(3)} ${bar(term.contribution)}`);
     }
-    console.log('  dislikes');
+    log('  dislikes');
     for (const term of explanation.negative) {
-      console.log(`    ${term.dimension.padEnd(34)} ${term.contribution.toFixed(3)} ${bar(term.contribution)}`);
+      log(`    ${term.dimension.padEnd(34)} ${term.contribution.toFixed(3)} ${bar(term.contribution)}`);
     }
 
-    console.log('  creator affinity');
+    log('  creator affinity');
     for (const creator of profile.creatorAffinity.slice(0, 5)) {
-      console.log(
+      log(
         `    ${(creator.creatorHandle ?? creator.creatorId).padEnd(34)} ` +
           `${creator.score.toFixed(3)}  (${creator.interactionCount} interactions)`,
       );
     }
-    console.log();
+    log();
   }
 
-  console.log('='.repeat(74));
-  console.log('Same corpus, opposite behaviour, different profiles - which is the point.');
-  console.log('Inspect over HTTP:  npm run dev:api');
-  console.log(`  GET /users/${DEMO_USERS[0].id}/profile`);
+  log('='.repeat(74));
+  log('Same corpus, opposite behaviour, different profiles - which is the point.');
+  log('Inspect over HTTP:  npm run dev:api');
+  log(`  GET /users/${DEMO_USERS[0].id}/profile`);
 }
 
-main()
-  .then(() => closeDb())
-  .catch(async (error: unknown) => {
-    console.error(error);
-    await closeDb();
-    process.exit(1);
-  });
+async function main(): Promise<void> {
+  await runSimulation();
+}
+
+// Only when this file is the entry point. Without the guard, importing
+// `runSimulation` from another script would also run the whole simulation at
+// import time and then close the shared database pool underneath its caller.
+if (process.argv[1]?.replace(/\\/g, '/').endsWith('scripts/simulate-events.ts')) {
+  main()
+    .then(() => closeDb())
+    .catch(async (error: unknown) => {
+      console.error(error);
+      await closeDb();
+      process.exit(1);
+    });
+}

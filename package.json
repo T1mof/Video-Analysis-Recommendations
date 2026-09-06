@@ -9,6 +9,8 @@
   "scripts": {
     "dev:api": "tsx watch src/api/server.ts",
     "dev:worker": "tsx watch src/workers/index.ts",
+    "worker:feed": "tsx src/workers/feed.ts",
+    "start:worker:feed": "node dist/workers/feed.js",
     "start:api": "node dist/api/server.js",
     "start:worker": "node dist/workers/index.js",
     "build": "tsc -p tsconfig.build.json",
@@ -29,10 +31,9 @@
     "simulate": "tsx scripts/simulate-events.ts",
     "demo:profile": "tsx scripts/simulate-events.ts",
     "demo:recommendations": "tsx scripts/demo-recommendations.ts",
-    "rebuild-feeds": "tsx scripts/rebuild-feeds.ts",
     "cost-model": "tsx scripts/cost-model.ts",
     "bench-vlm": "tsx scripts/bench-vlm.ts",
-    "demo": "tsx scripts/demo.ts"
+    "demo:feed": "tsx scripts/demo-feed.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1126.0",

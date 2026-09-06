@@ -128,6 +128,14 @@ const schema = z.object({
    * is Redis-only unconditionally - there is no code path from an HTTP request to
    * pgvector or to the ranker. See ARCHITECTURE.md "Serving 3k RPS".
    */
+  /**
+   * RESERVED - no consumer in the current code.
+   *
+   * These belong to a degradation strategy that is designed but not built: serving
+   * a cache miss from a precomputed global trending feed instead of answering 202.
+   * Kept because that remains the intended evolution (see ARCHITECTURE.md, "Future
+   * work"), and removing them would lose the decision along with the values.
+   */
   TRENDING_FEED_SIZE: int(100),
   TRENDING_FEED_REFRESH_SECONDS: int(300),
 
