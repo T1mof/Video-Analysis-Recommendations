@@ -1,9 +1,121 @@
-# Session handoff — M7 complete, M8 next
+# Session handoff — M8 in progress
 
 Durable checkpoint. Self-contained: everything needed to resume is here or in the
 files it names.
 
-**Date:** 2026-09-06 · **M4 `6d48ed2` · M5 `b889295` · M6 `1ace4e1`** · M7 implemented, not yet committed.
+**Date:** 2026-09-06
+
+| Milestone | Status | Commit |
+|---|---|---|
+| M4 — VLM analysis + model selection | **DONE** | `6d48ed2` |
+| M5 — interactions + profile | **DONE** | `b889295` |
+| M6 — candidates + ranking + diversity | **DONE** | `1ace4e1` |
+| M7 — feed serving + Redis cache + API | **DONE** | `da96ac8` |
+| **M8 — demo + architecture + documentation** | **IN PROGRESS** | uncommitted |
+
+---
+
+## M8 — demo, architecture, documentation: IN PROGRESS
+
+One demo page at `/demo`, an explanation sidecar behind it, and the documentation set
+brought to a finished state.
+
+**New code:** `src/api/demo.ts` (static mount + `GET /demo/api/feed-debug`),
+`src/feed/debug.ts` (sidecar types + projection), `public/{index.html,app.js,styles.css}`,
+`scripts/demo-reset.ts`. Modified: `src/feed/cache.ts` (sidecar key, publish, eviction,
+read), `src/feed/worker.ts` (project and publish the sidecar), `src/api/server.ts`
+(register demo routes), `eslint.config.js` (lint `public/**/*.js` with browser globals).
+
+**Decisions worth not re-litigating:**
+
+- **The demo page is a client of the ordinary API.** `GET /feed`, `POST /interactions`,
+  `GET /users/:id/profile`. What a reviewer sees in the browser is the real serving path.
+  The only demo-specific endpoint is the explanation reader.
+- **The explanation is a sidecar projected at build time, never recomputed.** The M6 result
+  already holds every feature and weighted term and then discards them, because a *feed*
+  payload must be small. `projectFeedDebug` captures them once, in the worker, into
+  `feed:debug:{userId}:{feedId}`. The demo endpoint imports neither the recommender nor any
+  database module; a test makes the recommender throw to keep it that way.
+- **The sidecar is published by `publishGeneration`, not by a second writer**, so retention
+  has exactly one implementation and an explanation cannot outlive the ranking it explains
+  or survive as an orphan.
+- **It is not free: MEASURED 1.6 KB/item against the feed payload's 96 B/item**, ~17×, so
+  it is gated by `FEED_DEBUG_SIDECAR` with a **code default of `false`**. The one new env
+  key of M8. `.env.example` sets it to `true` because that file *is* the local demo
+  configuration; a deployment that changes nothing writes no diagnostics. The flag governs
+  the **writer** — the endpoint serves a sidecar if one exists, and distinguishes
+  `debug_sidecar_disabled` from `no_debug_data` so the page can say which.
+  `buildFeed(job, { withDebugSidecar })` takes it explicitly so tests never depend on
+  ambient config. Production and demo Redis memory are documented separately in
+  ARCHITECTURE §12 and must not be added together.
+- **No auto-impressions from the UI.** Impressions mark videos seen; sending them on every
+  render would shrink the candidate pool on a 30-video corpus and degrade the demo as it
+  ran. The five preference-changing controls are the spec'd set anyway.
+- **`demo:reset` wraps the M5 simulation** rather than being a second dataset generator,
+  and additionally clears cached generations and pending jobs — which the simulation knows
+  nothing about. Without that, a reset leaves feeds ranked against the *previous* profile.
+- **Demo routes are mounted unconditionally**, including under `NODE_ENV=production`. A
+  deployment would gate or omit them. Recorded as a limitation rather than solved with an
+  env key the milestone did not ask for.
+- **`public/**/*.js` is linted, not ignored.** It caught a missing function on the first
+  run.
+
+**Documentation rebuilt:** `ARCHITECTURE.md` restructured into 18 numbered sections with a
+table of contents and a Mermaid overview diagram separating offline / interaction /
+background / hot path; `README.md` into reviewer-first order; new `docs/DEMO_SCRIPT.md` and
+`docs/DEMO_CHEATSHEET.md`.
+
+**Contradictions found and fixed:**
+
+- `docs/BENCHMARK.md` did not exist — two links pointed at it. Now
+  `BENCHMARK-qwen3vl-8b-rented.md` / `BENCHMARK-qwen2.5vl-3b-local.md`.
+- The status header claimed cost estimation and the failure matrix "arrive with M2–M6";
+  the closing line listed video analysis, the recommender and cost estimation as still
+  missing. All three existed.
+- The trending fallback appeared in the 3k RPS failure matrix with no marker, contradicting
+  the same document's statement that it is not implemented. Every mention is now labelled
+  CURRENT MVP (202) or FUTURE (design).
+- The feature-model table claimed ranking features live in `video_stats`. They do not.
+
+**Two factual corrections, both evidenced:**
+
+- **Frames per video: 7.5 → 7.1.** 212 kept frames ÷ 30 videos = 7.07, and
+  `COST_MODEL.md` independently reports 7.1 MEASURED from `frames_used`. The 7.5 was stale.
+- **`video_stats` and `user_seen` are dead schema** — declared in M1, and grep finds no
+  reader or writer anywhere outside the schema file and migrations. Trending aggregates
+  `events` on read; "seen" is derived as distinct videos with any event. Recorded in
+  ARCHITECTURE §6 and the limitations list rather than dropped: a table drop is a migration
+  and belongs with the taxonomy-v3 work.
+
+**Same-epoch duplicate build — found during the walkthrough, then fixed.** A single `like`
+consumed both generation-retention slots: the interaction queues a build at the new epoch;
+the client's next `GET` sees the dropped pointer, answers 202 and queues another at the
+*same* epoch. BullMQ releases a deduplication key when its job completes, so the second job
+was admitted — and the epoch guard rejects only *older* epochs, not equal ones. Both
+published, and the second evicted the generation the user was still reading.
+
+Fixed in `src/feed/worker.ts` with two checks — before the ranking pass and again before
+publishing — for an active generation whose `epoch` equals the job's. Reported as
+`already_built`, distinct from `stale`. Three things worth not re-litigating:
+
+- **Compared against `FeedGeneration.epoch`, not a permanent marker.** A per-user "highest
+  epoch built" value would forbid a legitimate rebuild after the pointer expires.
+- **Applies to `miss` and `invalidation` only.** `refill` and `prewarm` exist to build a new
+  generation *while* one is active; a blanket rule would have silently disabled refill.
+- **Not the same problem as interaction coalescing.** That is `view → complete → like`
+  producing three *different* epochs — a tuning question, still future work (§18). This was
+  two builds for one epoch.
+
+Tests: `tests/integration/feedBuild.test.ts`, cases A–F.
+
+**One pre-existing fragile test, fixed.** `recommender.test.ts` → "gives a video the same
+popularity for a different user and a different limit" asserted that a cold user's **top 3**
+intersects a warm user's **top 10**. That overlap was incidental: the same database also
+holds the 30-video demo corpus, whose engagement shifts every time `demo:reset` runs, and
+two differently-ranked top-N lists over ~34 videos can legitimately share nothing. Running
+the demo repeatedly during M8 made it fail. The limits are now 25 and 20 — still different,
+so the property in the test's name is still what is checked, but the overlap is now
+structural rather than luck. No M6 code changed; verified stable across a `demo:reset`.
 
 ---
 
@@ -327,8 +439,13 @@ Two known findings deliberately left alone, both recorded:
 
 ### Checks
 
-`typecheck 0` · `lint 0` · `tests 347 passed, 5 skipped` (with `TEST_INTEGRATION=1`;
-without it the 4 integration files are skipped) · `check:env` in sync at 78 keys
+`typecheck 0` · `lint 0` · `tests 364 passed, 5 skipped` across 28 files (with
+`TEST_INTEGRATION=1`; without it the integration files skip themselves) · `check:env` in
+sync at 78 keys · clean-bootstrap smoke over the documented README commands
+
+**Do not run `npm run worker:feed` while the integration suite runs** — it drains the same
+queue the tests assert on, and the failure looks like a broken epoch guard rather than an
+environment problem.
 
 ---
 
@@ -344,27 +461,31 @@ without the owner's confirmation.
 | | | |
 |---|---|---|
 | M0–M3 | infra, taxonomy v2, ingestion, DEV-15, preprocessing | **DONE** |
-| M4 | VLM analysis + model selection | **DONE** |
-| M5 | user interactions + user profile | **DONE** |
-| M6 | candidate generation + ranking + diversity | **DONE** |
-| M7 | feed serving + Redis cache + API | **DONE** |
-| **M8** | **minimal demo + architecture + documentation** | **NEXT** |
-| M8.4–M8.6 | HOLDOUT-15 prep, VLM quality optimization, held-out eval | after MVP |
+| M4 | VLM analysis + model selection | **DONE** `6d48ed2` |
+| M5 | user interactions + user profile | **DONE** `b889295` |
+| M6 | candidate generation + ranking + diversity | **DONE** `1ace4e1` |
+| M7 | feed serving + Redis cache + API | **DONE** `da96ac8` |
+| **M8** | **demo + architecture + documentation** | **IN PROGRESS**, uncommitted |
+| M8.4 | HOLDOUT-15 preparation | **NEXT after M8** |
+| M8.5–M8.6 | VLM quality optimization, held-out eval | after MVP |
 | M8.7 | learned-ranker readiness | optional |
 | M9 | scraper | optional bonus |
-| M10 | final polish, clean-clone check, demo rehearsal | planned |
+| M10 | final polish, full clean-clone check, demo rehearsal | planned |
 
-**M7 — feed serving.** It consumes what M6 built:
+**M8.4 is next, and must not be started early.** No HOLDOUT labelling, no new VLM run,
+no prompt v3, no Qwen3.5 — the held-out set is worth nothing the moment it leaks, and it
+may be opened only after the configuration is frozen. Full protocol: [ROADMAP.md](ROADMAP.md).
 
-| M6 output | M7 use |
-|---|---|
-| `recommendCandidates(userId, limit)` | what a background job calls to fill a feed |
-| ordered list + diagnostics | the payload cached in Redis |
-| `candidateShortage` | the signal that a repeat/backfill policy is needed |
+**Serving semantics, restated so they are not re-litigated.** `GET /feed` is a Redis read
+with **no** code path from an HTTP request to pgvector or to the ranker — not as a
+fallback, not behind a flag. Feeds are filled by an event-driven rebuild, by a cache miss
+and by refill.
 
-The shape is already decided and is the reason the 3k RPS design works:
-`GET /feed` must be a Redis read, with **no** code path from an HTTP request to
-pgvector or to the ranker — not as a fallback, not behind a flag. Feeds are filled
-by prewarm, by an event-driven rebuild, and a cache miss is served from the
-precomputed global trending feed. Then M8 (UI, docs, demo). Scraper is the bonus at
-the end. Full milestone table and quality-work strategy: [ROADMAP.md](ROADMAP.md).
+> A cache miss answers **`202 building`** in the current MVP. Serving a miss from a
+> precomputed global trending feed is a **future** degradation strategy for the 3k RPS
+> design — `TRENDING_FEED_SIZE` and `TRENDING_FEED_REFRESH_SECONDS` exist in config and
+> have no consumer. Earlier revisions of this file described it as if it were implemented.
+
+M10 still owes a **full clean-clone check**: M8 ran a clean-bootstrap smoke over the
+documented commands, which validates the M8 deliverable but is not the same as cloning
+into an empty directory after every remaining milestone.

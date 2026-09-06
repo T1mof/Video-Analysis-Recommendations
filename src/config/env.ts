@@ -138,6 +138,21 @@ const schema = z.object({
    */
   TRENDING_FEED_SIZE: int(100),
   TRENDING_FEED_REFRESH_SECONDS: int(300),
+  /**
+   * Per-generation explanation sidecar for the `/demo` page.
+   *
+   * **Off by default, and that default is the safe one.** The sidecar stores every
+   * ranking feature and weighted term for every item: measured at ~1.6 KB per item
+   * against the served generation's 96 B, so about 17x. That is a reasonable price
+   * for a local demonstration and a poor one for a production feed cache, which is
+   * why it is opt-in rather than something to remember to switch off.
+   *
+   * When off: builds, `GET /feed`, retention and the hot path are all unchanged, and
+   * no debug payload is written. When on: the worker projects the breakdown it
+   * already computed - there is never a second ranking pass - and the sidecar shares
+   * the generation's TTL and eviction. See src/feed/debug.ts.
+   */
+  FEED_DEBUG_SIDECAR: bool(false),
 
   // workers
   /**

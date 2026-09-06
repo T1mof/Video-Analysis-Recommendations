@@ -6,6 +6,7 @@ import { encodeFeatures } from '../../src/analysis/embedding.ts';
 import { TAXONOMY_VERSION } from '../../src/analysis/taxonomy.ts';
 import { PROMPT_VERSION } from '../../src/analysis/schema.ts';
 import { generateCandidates, loadEligibleVideos } from '../../src/reco/candidates.ts';
+import { normalisePopularity } from '../../src/reco/ranking.ts';
 import { recordInteraction } from '../../src/reco/interactions.ts';
 import { rebuildUserProfile } from '../../src/reco/profile.ts';
 import { recommendCandidates } from '../../src/reco/recommender.ts';
@@ -24,6 +25,8 @@ const enabled = process.env.TEST_INTEGRATION === '1';
 const PREFIX = 'rtest_';
 let warmUserId: string;
 let coldUserId: string;
+/** Generates engagement without making the target "seen" by either of the two above. */
+let engagementUserId: string;
 const created: string[] = [];
 
 async function makeVideo(
@@ -82,6 +85,7 @@ async function makeVideo(
 let poolVideoId: string;
 let unanalysedVideoId: string;
 let noCreatorVideoId: string;
+let popularityTargetId: string;
 
 beforeAll(async () => {
   if (!enabled) return;
@@ -96,6 +100,11 @@ beforeAll(async () => {
     .values({ label: `${PREFIX}cold` })
     .returning({ id: users.id });
   coldUserId = cold!.id;
+  const [engagement] = await db
+    .insert(users)
+    .values({ label: `${PREFIX}engagement` })
+    .returning({ id: users.id });
+  engagementUserId = engagement!.id;
 
   poolVideoId = await makeVideo('pool', { features: { setting: 'pool', actType: ['dancing'] } });
   await makeVideo('gym', { features: { setting: 'gym', actType: ['talking'] } });
@@ -113,13 +122,30 @@ beforeAll(async () => {
       type: i === 0 ? 'like' : 'view',
     });
   }
+  // A controlled popularity target. Created last, so it is the newest row in the
+  // table and therefore always inside the `fresh` source's window whatever else the
+  // database holds - which is what makes it findable without depending on corpus
+  // size. Its engagement comes from a third user, so it stays unseen (and so
+  // eligible) for both the warm and the cold user.
+  // Default features on purpose: popularity is computed from events, so nothing about
+  // this video's content should be able to influence the number under test.
+  popularityTargetId = await makeVideo('poptarget');
+  for (let i = 0; i < 3; i++) {
+    await recordInteraction({
+      eventId: `${PREFIX}pop-${i}`,
+      userId: engagementUserId,
+      videoId: popularityTargetId,
+      type: i === 0 ? 'like' : 'complete',
+    });
+  }
+
   await rebuildUserProfile(warmUserId);
   await rebuildUserProfile(coldUserId);
 }, 60_000);
 
 afterAll(async () => {
   if (!enabled) return;
-  for (const id of [warmUserId, coldUserId]) {
+  for (const id of [warmUserId, coldUserId, engagementUserId]) {
     if (id) await db.delete(users).where(eq(users.id, id));
   }
   await db.delete(videos).where(like(videos.externalId, `${PREFIX}%`));
@@ -233,21 +259,50 @@ describe.skipIf(!enabled)('recommendCandidates', () => {
     }
   });
 
-  it('gives a video the same popularity for a different user and a different limit', async () => {
-    // Popularity is normalised over the whole trending window, never over the
-    // caller's candidate pool - so it must not depend on who asked or for how many.
+  it('gives one video the same popularity for a different user and a different limit', async () => {
+    // Popularity is normalised over the whole trending window, never over the caller's
+    // candidate pool - so for a *named* video it must come out identical whoever asked
+    // and however many items they asked for.
+    //
+    // Asserted on one controlled video rather than on whatever two top-N lists happen
+    // to share. That earlier form was a coin flip on unrelated state: this database
+    // also holds the demo corpus, and two differently-ranked lists over it can
+    // legitimately share nothing, so the test failed for reasons that had nothing to do
+    // with the invariant in its name.
+    //
+    // `now` is pinned and passed to both calls because engagement decays linearly
+    // across the window - leaving it to the clock would vary the very number under
+    // test.
     const now = new Date();
-    const warm = await recommendCandidates(warmUserId, 10, { now, rebuildProfile: true });
-    const cold = await recommendCandidates(coldUserId, 3, { now, rebuildProfile: true });
 
-    const warmPopularity = new Map(warm.items.map((i) => [i.videoId, i.features.popularity]));
-    const coldPopularity = new Map(cold.items.map((i) => [i.videoId, i.features.popularity]));
+    const warmProfile = await rebuildUserProfile(warmUserId, { now });
+    const coldProfile = await rebuildUserProfile(coldUserId, { now });
+    expect(warmProfile.isColdStart).toBe(false);
+    expect(coldProfile.isColdStart).toBe(true);
 
-    const shared = [...warmPopularity.keys()].filter((id) => coldPopularity.has(id));
-    expect(shared.length).toBeGreaterThan(0);
-    for (const videoId of shared) {
-      expect(coldPopularity.get(videoId)).toBe(warmPopularity.get(videoId));
-    }
+    // Different users, different requested limits, and one is personalised while the
+    // other is served from global sources only - every axis that could leak into the
+    // number is varied at once.
+    const warm = await generateCandidates(warmProfile, 25, { now });
+    const cold = await generateCandidates(coldProfile, 3, { now });
+
+    // The target is the newest video in the table, so `fresh` retrieves it for both
+    // regardless of how large the corpus is. Eligibility, not ordering.
+    expect(warm.candidates.map((c) => c.videoId)).toContain(popularityTargetId);
+    expect(cold.candidates.map((c) => c.videoId)).toContain(popularityTargetId);
+
+    // `loadEngagement` takes only a clock: no user, no candidate set, no limit. This
+    // is the assertion that the aggregate really is global.
+    const warmEngagement = warm.engagement.get(popularityTargetId);
+    expect(warmEngagement).toBeGreaterThan(0);
+    expect(cold.engagement.get(popularityTargetId)).toBe(warmEngagement);
+
+    // And the feature the ranker consumes, which is what a score is actually built
+    // from. Exact equality: this is one arithmetic result, not an approximation.
+    const warmPopularity = normalisePopularity(warm.engagement).get(popularityTargetId);
+    const coldPopularity = normalisePopularity(cold.engagement).get(popularityTargetId);
+    expect(warmPopularity).toBeGreaterThan(0);
+    expect(coldPopularity).toBe(warmPopularity);
   });
 
   it('does not fail on a video without a creator', async () => {

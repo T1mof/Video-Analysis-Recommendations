@@ -1,7 +1,7 @@
 # Roadmap
 
 Single source of truth for milestone status and what is deliberately deferred.
-Updated 2026-09-05, after M4 closed.
+Updated 2026-09-06, during M8.
 
 ## Status
 
@@ -16,8 +16,8 @@ Updated 2026-09-05, after M4 closed.
 | **M5** | User interactions + user profile | **DONE** |
 | **M6** | Candidate generation + ranking + diversity | **DONE** |
 | **M7** | Feed serving + Redis cache + API | **DONE** |
-| **M8** | Minimal demo + architecture + documentation | **NEXT** |
-| **M8.4** | Evaluation dataset preparation — HOLDOUT-15 | after MVP |
+| **M8** | Demo UI + architecture + final MVP documentation | **IN PROGRESS** |
+| **M8.4** | Evaluation dataset preparation — HOLDOUT-15 | **NEXT**, after MVP |
 | **M8.5** | VLM quality optimization — pipeline first, models last | after MVP |
 | **M8.6** | Final held-out evaluation | after MVP |
 | **M8.7** | Learned-ranker readiness | **optional**, after MVP |
@@ -43,7 +43,7 @@ Reused the `events` table and the `PROFILE_HALFLIFE_DAYS` / `COLD_START_MIN_INTE
 config laid down in M1 rather than introducing a parallel mechanism; added
 idempotency (`events.event_id`), profile diagnostics columns and a
 `user_creator_affinity` table. Full reasoning in
-[ARCHITECTURE.md](../ARCHITECTURE.md#user-interactions-and-the-preference-profile).
+[ARCHITECTURE.md §8](../ARCHITECTURE.md#8-user-interactions-and-the-preference-profile).
 
 M6 consumes this: the profile vector for similarity candidates, `tag_affinity` for
 tag candidates, `user_creator_affinity` as a ranking feature, and `is_cold_start`
@@ -62,7 +62,7 @@ score = 1.0×affinity + 0.15×quality + 0.2×freshness + 0.25×popularity
 
 All weights and caps come from the config laid down in M1; M6 added no new env keys.
 Weights are **heuristic priors** — see M8.7 for the learned-ranker path. Full design
-in [ARCHITECTURE.md](../ARCHITECTURE.md#candidate-generation-ranking-and-diversity).
+in [ARCHITECTURE.md §9–§11](../ARCHITECTURE.md#9-candidate-generation).
 
 M7 consumes this: `recommendCandidates()` is what a background job calls to fill a
 user's Redis feed. Nothing in M6 runs on the request path.
@@ -84,6 +84,31 @@ is 202, a cache outage is 503. Reused `FEED_SIZE`, `FEED_TTL_SECONDS` and
 `FEED_REFILL_WATERMARK` from M1 - no new env keys, no migrations.
 
 M8 consumes this: the UI is a client of `GET /feed` and `POST /interactions`.
+
+## What M8 delivered
+
+One demo page at `/demo` and a finished documentation set.
+
+```
+GET /demo  ->  vanilla HTML/CSS/JS via @fastify/static  ->  client of the ordinary API
+GET /demo/api/feed-debug  ->  one Redis key  ->  why each item is where it is
+```
+
+The explanation is a **sidecar projected at feed-build time**, never recomputed: the M6
+result already holds every feature and weighted term and then discards them, so the worker
+captures them once into `feed:debug:{userId}:{feedId}`, published and evicted by the same
+retention rule as the generation. The demo endpoint imports neither the recommender nor any
+database module, and a test makes the recommender throw to keep it that way. MEASURED at
+~1.6 KB/item against the feed payload's 96 B/item, so it is a demonstration surface rather
+than a production default.
+
+`ARCHITECTURE.md` was restructured into 18 numbered sections with a table of contents and a
+Mermaid overview diagram, and `README.md` into reviewer-first order. New:
+[DEMO_SCRIPT.md](DEMO_SCRIPT.md) and [DEMO_CHEATSHEET.md](DEMO_CHEATSHEET.md). Four
+documentation contradictions and two factual errors were found and fixed — details in
+[SESSION_HANDOFF.md](SESSION_HANDOFF.md).
+
+**M8.4 is next and must not be started early.**
 
 ## Current VLM baseline — frozen
 

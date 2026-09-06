@@ -31,6 +31,7 @@
     "simulate": "tsx scripts/simulate-events.ts",
     "demo:profile": "tsx scripts/simulate-events.ts",
     "demo:recommendations": "tsx scripts/demo-recommendations.ts",
+    "demo:reset": "tsx scripts/demo-reset.ts",
     "cost-model": "tsx scripts/cost-model.ts",
     "bench-vlm": "tsx scripts/bench-vlm.ts",
     "demo:feed": "tsx scripts/demo-feed.ts"

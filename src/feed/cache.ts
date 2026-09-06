@@ -2,6 +2,9 @@ import { randomUUID } from 'node:crypto';
 import type { Redis } from 'ioredis';
 import { cacheConnection } from '../queue/connection.ts';
 import { env } from '../config/env.ts';
+// Type-only, therefore erased: this module has no runtime dependency on the debug
+// sidecar, and the request path has none on the recommender types behind it.
+import type { FeedDebugGeneration } from './debug.ts';
 
 /**
  * Feed cache: immutable generations behind an active pointer.
@@ -11,6 +14,7 @@ import { env } from '../config/env.ts';
  *   feed:{userId}:epoch            integer, bumped on every state change
  *   feed:{userId}:active           feedId of the generation currently served
  *   feed:gen:{userId}:{feedId}     the generation itself, immutable once written
+ *   feed:debug:{userId}:{feedId}   the demo-only explanation sidecar for it
  *
  * A generation is never mutated. Rebuilding writes a new feedId and flips the
  * pointer, which is what lets an already-issued cursor keep reading the exact list
@@ -72,6 +76,12 @@ export const feedKeys = {
   epoch: (userId: string) => `feed:${userId}:epoch`,
   active: (userId: string) => `feed:${userId}:active`,
   generation: (userId: string, feedId: string) => `feed:gen:${userId}:${feedId}`,
+  /**
+   * The demo explanation sidecar for one generation. Written with it, expired with
+   * it, evicted with it - an explanation that outlived its ranking would describe a
+   * feed nobody is being served.
+   */
+  debug: (userId: string, feedId: string) => `feed:debug:${userId}:${feedId}`,
   /** Newest-first list of this user's live generations, so trimming needs no SCAN. */
   index: (userId: string) => `feed:${userId}:generations`,
 };
@@ -175,18 +185,27 @@ export async function readActiveGeneration(userId: string): Promise<FeedGenerati
  * The order is deliberate and not interchangeable:
  *
  *   1. write the payload      - so nothing can name a feed that does not exist
- *   2. register it in the index
- *   3. flip the active pointer
- *   4. trim the index to the retention limit
- *   5. delete the payloads that fell off
+ *   2. write the debug sidecar, if one was built
+ *   3. register it in the index
+ *   4. flip the active pointer
+ *   5. trim the index to the retention limit
+ *   6. delete the payloads and sidecars that fell off
  *
  * Pointing at a feed before writing it would make every reader see a miss and
  * enqueue another build. Trimming before the pointer moves could delete the
  * generation a concurrent reader is about to be sent to. Because the new
  * generation is pushed to the head and eviction takes from the tail, the active
  * generation can never be the one trimmed - the invariant that matters most here.
+ *
+ * The sidecar is published here, through the same index and the same trim, rather
+ * than by a second writer. Retention has exactly one implementation, so a sidecar
+ * cannot outlive the generation it explains or survive as an orphan the index has
+ * forgotten about.
  */
-export async function publishGeneration(generation: FeedGeneration): Promise<void> {
+export async function publishGeneration(
+  generation: FeedGeneration,
+  debug?: FeedDebugGeneration,
+): Promise<void> {
   return guard(async () => {
     const ttl = env.FEED_TTL_SECONDS;
     const retention = ttl * GENERATION_RETENTION_MULTIPLIER;
@@ -194,6 +213,10 @@ export async function publishGeneration(generation: FeedGeneration): Promise<voi
     const redis = client();
 
     await redis.set(feedKeys.generation(userId, feedId), JSON.stringify(generation), 'EX', retention);
+
+    if (debug) {
+      await redis.set(feedKeys.debug(userId, feedId), JSON.stringify(debug), 'EX', retention);
+    }
 
     await redis.lpush(feedKeys.index(userId), feedId);
     await redis.expire(feedKeys.index(userId), retention);
@@ -206,7 +229,31 @@ export async function publishGeneration(generation: FeedGeneration): Promise<voi
     const evicted = await redis.lrange(feedKeys.index(userId), MAX_RETAINED_GENERATIONS_PER_USER, -1);
     if (evicted.length > 0) {
       await redis.ltrim(feedKeys.index(userId), 0, MAX_RETAINED_GENERATIONS_PER_USER - 1);
-      await redis.del(...evicted.map((id) => feedKeys.generation(userId, id)));
+      await redis.del(
+        ...evicted.flatMap((id) => [feedKeys.generation(userId, id), feedKeys.debug(userId, id)]),
+      );
+    }
+  });
+}
+
+/**
+ * The explanation sidecar for one generation, or null when there is none.
+ *
+ * Null is an ordinary answer, not an error: a generation built before the sidecar
+ * existed, or one whose sidecar write failed, still serves perfectly well as a feed.
+ * The demo degrades to what `GET /feed` returned rather than reporting a fault.
+ */
+export async function readFeedDebug(
+  userId: string,
+  feedId: string,
+): Promise<FeedDebugGeneration | null> {
+  return guard(async () => {
+    const raw = await client().get(feedKeys.debug(userId, feedId));
+    if (raw === null) return null;
+    try {
+      return JSON.parse(raw) as FeedDebugGeneration;
+    } catch {
+      return null;
     }
   });
 }
@@ -231,7 +278,7 @@ export async function clearFeed(userId: string): Promise<void> {
       feedKeys.active(userId),
       feedKeys.epoch(userId),
       feedKeys.index(userId),
-      ...feedIds.map((id) => feedKeys.generation(userId, id)),
+      ...feedIds.flatMap((id) => [feedKeys.generation(userId, id), feedKeys.debug(userId, id)]),
     );
   });
 }

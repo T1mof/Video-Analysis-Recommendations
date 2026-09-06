@@ -19,18 +19,23 @@ import { RedisUnavailableError, invalidateFeed } from '../feed/cache.ts';
 import { InvalidCursorError } from '../feed/cursor.ts';
 import { FeedGoneError, getFeedPage } from '../feed/service.ts';
 import { closeFeedQueue, enqueueFeedBuild } from '../feed/queue.ts';
+import { registerDemoRoutes } from './demo.ts';
 
 /**
  * HTTP surface.
  *
- * M5 only: interaction intake and a profile inspector. There is deliberately no
- * `/feed` here yet - that is M7, and it must be a Redis read rather than
- * anything that touches this code.
+ * Two kinds of route live here, and the difference matters:
  *
- * The profile rebuild runs inline on write. With one user's history that is a
- * few milliseconds, and it keeps the demo honest: post a like, read the profile,
- * see it move. Production moves this to a queue - see ARCHITECTURE.md - which is
- * why the rebuild is a separate function call rather than inlined logic.
+ *   - the API proper - `/feed`, `/interactions`, `/users/:id/profile`, `/signals`,
+ *     `/health`, `/ready`;
+ *   - the demo surface under `/demo`, which is a local demonstration of that API and
+ *     not part of it. See `api/demo.ts`.
+ *
+ * `GET /feed` is the hot path and reads Redis only. The profile rebuild on
+ * `POST /interactions` runs inline: with one user's history that is a few
+ * milliseconds, and it keeps the demo honest - post a like, read the profile, see it
+ * move. Production moves it to a queue (see ARCHITECTURE.md), which is why the
+ * rebuild is a separate function call rather than inlined logic.
  */
 
 export interface ServerOptions {
@@ -274,6 +279,8 @@ export function buildServer(options: ServerOptions = {}): FastifyInstance {
       ...(query.vector === 'true' ? { vector: profile.vector } : {}),
     });
   });
+
+  registerDemoRoutes(app);
 
   return app;
 }

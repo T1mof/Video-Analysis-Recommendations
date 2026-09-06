@@ -85,8 +85,12 @@ export interface SimulationOptions {
  * on whatever the last run happened to leave behind. Without that, repeated demo
  * runs accumulate interactions until a user has seen the whole corpus and every
  * feed collapses to a handful of items.
+ *
+ * Returns whether the scenario was actually established. A clone with no corpus is a
+ * legitimate state, not a crash - but a caller must be able to tell the difference,
+ * or it will cheerfully report success over the top of the error.
  */
-export async function runSimulation(options: SimulationOptions = {}): Promise<void> {
+export async function runSimulation(options: SimulationOptions = {}): Promise<boolean> {
   const reset = options.reset ?? process.argv.includes('--reset');
   const log = options.quiet ? () => {} : console.log;
 
@@ -104,7 +108,7 @@ export async function runSimulation(options: SimulationOptions = {}): Promise<vo
       'No analysed videos with embeddings. Run: npm run ingest && npm run analyze -- --all',
     );
     process.exitCode = 1;
-    return;
+    return false;
   }
 
   log(`corpus: ${corpus.length} analysed videos`);
@@ -219,6 +223,7 @@ export async function runSimulation(options: SimulationOptions = {}): Promise<vo
   log('Same corpus, opposite behaviour, different profiles - which is the point.');
   log('Inspect over HTTP:  npm run dev:api');
   log(`  GET /users/${DEMO_USERS[0].id}/profile`);
+  return true;
 }
 
 async function main(): Promise<void> {

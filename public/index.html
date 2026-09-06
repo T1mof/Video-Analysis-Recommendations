@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Feed demo</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div>
+        <h1>Personalised feed &mdash; demo</h1>
+        <p class="sub">
+          This page is a client of the ordinary API:
+          <code>GET /feed</code>, <code>POST /interactions</code>,
+          <code>GET /users/:id/profile</code>. It never computes a recommendation.
+        </p>
+      </div>
+      <div class="topbar-actions">
+        <span id="worker-warning" class="warning" hidden>
+          feed stays 202 &mdash; is <code>npm run worker:feed</code> running?
+        </span>
+      </div>
+    </header>
+
+    <main>
+      <aside class="side">
+        <section class="panel">
+          <h2>User</h2>
+          <div id="users" class="users"></div>
+          <p class="hint">
+            Seeded by <code>npm run demo:reset</code>. Alice and Bob reacted to the same
+            corpus in opposite ways; Carol has one signal and stays cold-start.
+          </p>
+        </section>
+
+        <section class="panel">
+          <h2>Profile</h2>
+          <div id="profile" class="profile">
+            <p class="muted">Select a user.</p>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Request log</h2>
+          <ol id="log" class="log"></ol>
+        </section>
+      </aside>
+
+      <section class="feed-column">
+        <div class="panel feed-header">
+          <h2>Feed</h2>
+          <div id="feed-meta" class="feed-meta muted">Nothing requested yet.</div>
+          <div id="build-diagnostics" class="diagnostics" hidden></div>
+        </div>
+
+        <div id="feed-status" class="status" hidden></div>
+        <div id="feed" class="feed"></div>
+
+        <div class="feed-footer">
+          <button id="load-more" class="btn" hidden>Load more (cursor)</button>
+          <button id="restart" class="btn ghost">Restart session</button>
+        </div>
+      </section>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
